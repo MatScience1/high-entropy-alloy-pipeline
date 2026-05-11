@@ -104,6 +104,5 @@ All tuneable parameters live in `config.py`. Key settings:
 
 If you use this pipeline, please cite:
 
-> [Your paper here]  
 > Starikov et al. Phys. Rev. Materials **8**, 043603 (2024)  
 > Karavaev et al. J. Chem. Phys. **144**, 194507 (2016)
