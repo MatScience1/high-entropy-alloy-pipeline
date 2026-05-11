@@ -168,8 +168,9 @@ pair_style adp
 pair_coeff * * {pot} W Mo Nb Zr Ti Ta
 min_style cg
 minimize 1e-12 1e-12 10000 10000
-variable N equal count(all)
+variable N    equal count(all)
 variable Etot equal pe
+variable Lbox equal lx
 print "PERFECT_ENERGY ${{N}} ${{Etot}} ${{Lbox}}"
 write_data perfect.data
 """
@@ -191,7 +192,7 @@ pair_coeff * * {pot} W Mo Nb Zr Ti Ta
 min_style cg
 minimize 1e-12 1e-12 10000 10000
 variable Evac equal pe
-print "VACANCY_ENERGY {atom_id} ${{Nvac}} ${{Evac}}"
+print "VACANCY_ENERGY {atom_id} ${{Evac}}"
 """
 
 
@@ -217,6 +218,11 @@ def compute_ef(comp: dict[str, float], a0: float) -> float:
     after removing atom i.  The chemical potential for the removed atom is
     taken as E(N)/N (energy per atom in the alloy).
     """
+    # Skip LAMMPS for HCP elements — ADP gives unphysical BCC energies
+    active = [e for e in ELEMENTS if comp.get(e, 0.0) > 0.99]
+    if len(active) == 1 and active[0] not in _BCC_STABLE:
+        return _EF_FALLBACK[active[0]]
+
     pot = POTENTIAL_FILE
     with tempfile.TemporaryDirectory(prefix="ef_") as tmp:
         work = Path(tmp)
@@ -255,7 +261,7 @@ def _parse_perfect(out: str) -> tuple[int, float]:
 def _parse_vacancy(out: str) -> float:
     for line in out.splitlines():
         if line.strip().startswith("VACANCY_ENERGY"):
-            return float(line.split()[3])
+            return float(line.split()[2])
     raise ValueError("VACANCY_ENERGY not found in LAMMPS output")
 
 
@@ -265,9 +271,15 @@ def _parse_vacancy(out: str) -> float:
 
 # Fallback Ef values [eV] if LAMMPS calculation fails.
 # Source: DFT literature (approximate; update when site-specific data available)
+_BCC_STABLE = {"W", "Mo", "Nb", "Ta"}  # Zr, Ti are HCP at 0K — skip ADP
+
 _EF_FALLBACK = {
-    "W": 3.56, "Mo": 2.88, "Nb": 2.91,
-    "Zr": 2.39, "Ti": 1.84, "Ta": 3.03,
+    "W":  3.56,   # Starikov 2024
+    "Mo": 2.88,   # Starikov 2024
+    "Nb": 2.91,   # Starikov 2024
+    "Zr": 2.05,   # DFT-GGA BCC
+    "Ti": 1.97,   # DFT-GGA BCC
+    "Ta": 3.03,   # Satta et al. PRB 1999
 }
 
 

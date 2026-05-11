@@ -33,7 +33,7 @@ from pathlib import Path
 # ══════════════════════════════════════════════════════════════════════════════
 #  MODE SELECTOR  ← change this line only
 # ══════════════════════════════════════════════════════════════════════════════
-TEST_MODE: bool = False   # True → fast debug run; False → full production
+TEST_MODE: bool = True  # True → fast debug run; False → full production
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PATHS
@@ -129,7 +129,7 @@ R_SRO: float = compute_r_sro(3.30)   # equiatomic estimate; 3.079 Å
 # ══════════════════════════════════════════════════════════════════════════════
 GRACE_MODEL_DIR: str = os.environ.get(
     "GRACE_MODEL_DIR",
-    "$HOME/.cache/grace/GRACE-2L-OMAT",
+    "$HOME/users/razikaxz/.cache/grace/GRACE-2L-OMAT/",
 )
 GRACE_PAIR_STYLE: str = "grace"
 GRACE_ELEMENTS:   str = " ".join(ELEMENTS)   # "W Mo Nb Zr Ti Ta"

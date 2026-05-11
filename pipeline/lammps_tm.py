@@ -138,7 +138,7 @@ def build_coexistence_input(
 # Supercell   : {COEX_NX}×{COEX_NY}×{COEX_NZ} BCC = {n_atoms} atoms
 # ═══════════════════════════════════════════════════════════════════════════
 
-variable  GRACE_MODEL_DIR  string  "{GRACE_MODEL_DIR}"
+variable  GRACE_MODEL_DIR  getenv  GRACE_MODEL_DIR
 
 units        metal
 boundary     p p p
@@ -160,7 +160,7 @@ create_atoms  1 box        # all atoms start as W
 
 # ── GRACE MLIP ────────────────────────────────────────────────────────────
 pair_style  grace
-pair_coeff  * * ${{GRACE_MODEL_DIR}}/grace_model.pt {" ".join(ELEMENTS)}
+pair_coeff  * * ${{GRACE_MODEL_DIR}} {" ".join(ELEMENTS)}
 
 # ── define solid / liquid half-regions ───────────────────────────────────
 region   solid_reg   block INF INF  INF INF  0                  {COEX_SOLID_HALF}  units lattice
@@ -326,35 +326,29 @@ exit $EXIT_CODE
 
 def parse_coexistence_log(log_path: Path) -> float | None:
     """
-    Return a Tm estimate from log.coexistence, or None if not converged.
+    Return Tm estimate from log.coexistence, or None if not converged.
 
-    Reads the stress-equalization block (thermo every 500 steps,
-    columns: step temp pe ke etotal vol press pxx pyy pzz).
-    Stops at the COEXISTENCE_RESULT print line.
+    Reads all thermo rows from the log (columns: step temp pe ke etotal
+    vol press pxx pyy pzz).  Stops at the COEXISTENCE_RESULT print line.
+    The stress-equalization run is always last, so its rows are the tail.
 
-    Convergence criterion: mean |press| over the last 50 rows < 500 bar.
-    If converged, returns mean temperature of those rows.
+    Convergence: mean |press| over the final 50 rows < 500 bar (0.05 GPa).
     """
     if not log_path.exists():
         return None
 
     temps:   list[float] = []
     presses: list[float] = []
-    in_stress_eq = False
+    found_result = False
 
     with log_path.open() as fh:
         for line in fh:
             s = line.strip()
             if "COEXISTENCE_RESULT" in s:
-                break                        # end of useful output
-            # stress_eq block begins after LAMMPS echoes "fix stress_eq …"
-            if s.startswith("fix") and "stress_eq" in s and "npt" in s:
-                in_stress_eq = True
-                continue
-            if not in_stress_eq:
-                continue
+                found_result = True
+                break
             parts = s.split()
-            # thermo line: first token is step (integer), ≥10 columns
+            # Thermo data line: first token is an integer step number, ≥10 cols
             if len(parts) >= 10 and parts[0].isdigit():
                 try:
                     temps.append(float(parts[1]))    # temp
@@ -362,14 +356,13 @@ def parse_coexistence_log(log_path: Path) -> float | None:
                 except ValueError:
                     continue
 
-    if len(temps) < 10:
-        return None   # truncated or crashed run
+    if not found_result or len(temps) < 10:
+        return None   # run crashed or didn't complete
 
     tail_p = presses[-50:]
-    if abs(statistics.mean(tail_p)) < 500.0:          # 500 bar = 0.05 GPa
+    if abs(statistics.mean(tail_p)) < 500.0:
         return statistics.mean(temps[-50:])
     return None
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Directory builder — Stage 3b
