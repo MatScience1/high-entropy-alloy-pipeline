@@ -12,8 +12,8 @@ For each of 100 alloy compositions sampled from the 6-element composition space:
 
 1. Computes the **melting temperature** $T_m$ via solid-liquid phase coexistence (GRACE-2L-OMAT MLIP, Karavaev modified Z-method).
 2. Runs **MC + NPT equilibration** followed by long **MD diffusion** with a single vacancy (ADP potential, 432-atom BCC supercell).
-3. Extracts per-element **tracer diffusivities** $D^*_i(T)$ via the Einstein relation and fits Arrhenius parameters $(D_{0,i}, Q_i)$.
-4. Computes **Warren-Cowley SRO parameters** $\alpha_{ij}(T)$.
+3. Extracts per-element **tracer diffusivities** $D^*_i(T)$ via the Einstein relation and fits Arrhenius parameters ($D_{0,i}$, $Q_i$).
+4. Computes **Warren-Cowley** SRO parameters $\alpha_{ij}(T)$.
 5. Fits a **composition-property polynomial** across all 100 alloys.
 6. Produces $D^*_i$ vs. $T/T_m$ plots—homologous temperature normalization.
 
@@ -22,7 +22,7 @@ For each of 100 alloy compositions sampled from the 6-element composition space:
 ## Quick start
 
 ```bash
-git clone https://github.com/<you>/WMoNbZrTiTa.git
+git clone https://github.com/akmal523/high-entropy-alloy-pipeline.git
 cd WMoNbZrTiTa
 pip install -r requirements.txt
 
