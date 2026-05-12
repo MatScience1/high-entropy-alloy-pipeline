@@ -1,4 +1,3 @@
-```markdown
 # Step-by-step Test Guide
 
 Run this before any production job to verify the full pipeline works on your

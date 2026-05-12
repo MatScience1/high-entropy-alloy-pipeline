@@ -14,16 +14,24 @@
 
 ## Stage 2 & 3 — Physical Constants
 
-### a0 — Equilibrium Lattice Parameter
+### a0 — Equilibrium lattice parameter
 
-* **Caller:** `constants.py`, `compute_sf_phonopy.py`
-* **Mechanics (Pure Metals):** Builds a $1\times1\times1$ BCC unit cell. Runs a LAMMPS `box/relax` at $P=0$ followed by `minimize` to find the exact ADP potential lattice constant.
-* **Mechanics (Alloys):** Builds a $5\times5\times5$ BCC supercell (250 atoms). Assigns elements via sequential conditional probabilities. Runs `box/relax` to eliminate localized chemical stress.
-* **Fallback:** Vegard's linear mixing rule:
+We calculate the equilibrium lattice parameter ($a_0$) to ensure the simulated crystal has zero pressure, preventing artificial stress from skewing diffusion dynamics. The pipeline handles $a_0$ in two distinct locations for two different purposes:
+
+**1. Pure Elements (for Vacancy Entropy $S_f$)**
+
+* **Caller:** `compute_sf_phonopy.py`
+* **Mechanics:** Builds a standard $1 \times 1 \times 1$ BCC unit cell of a single pure element. Runs a LAMMPS `box/relax` at $P=0$ followed by `minimize`.
+* **Why:** Phonopy is hyper-sensitive to atomic forces. The unit cell must be perfectly relaxed to the specific ADP potential to avoid imaginary phonon frequencies before building the $6 \times 6 \times 6$ supercell.
+
+**2. HEA Compositions (for Main Pipeline)**
+
+* **Caller:** `constants.py`
+* **Mechanics:** Builds a $5 \times 5 \times 5$ BCC supercell (250 atoms). Distributes elements randomly matching the exact mole fractions ($x_i$) using a sequential conditional probability assignment. Runs a LAMMPS `box/relax` at $P=0$ followed by `minimize` to relax localized chemical stress.
+* **Fallback:** If the MD minimization fails (e.g., highly unstable phase), the system defaults to Vegard's Law (linear atomic volume mixing):
 
 ```text
-a0 = Σᵢ xᵢ a_{0,i}
-
+$$a_0 = \sum_i x_i a_{0,i}$$
 ```
 
 > Vegard, Z. Phys. 5, 17 (1921)
@@ -38,11 +46,12 @@ a0 = Σᵢ xᵢ a_{0,i}
 
 
 * **Formula:**
-
 ```text
 Sf = S_vac_supercell - ((N-1)/N) * S_perf_supercell
 
 ```
+
+
 
 > Starikov et al., Phys. Rev. Materials 8, 043603 (2024), Sec III.A
 
@@ -51,11 +60,12 @@ Sf = S_vac_supercell - ((N-1)/N) * S_perf_supercell
 * **Caller:** `constants.py`
 * **Mechanics:** Uses LAMMPS with the ADP potential on a $5\times5\times5$ supercell (250 atoms). Calculates the total potential energy of the perfect mixed alloy crystal $E(N)$. Then, it sequentially removes an atom at `EF_N_SITES` different random locations, minimizing the structure each time to find $E(N-1, \text{site}_i)$.
 * **Formula:** Computes the mean energy required to form a vacancy, using the average atom energy $E(N)/N$ as the chemical potential:
-
 ```text
 ⟨Ef⟩ = mean_i [ E(N−1, site_i) ] − ((N−1)/N) * E(N)
 
 ```
+
+
 
 > Starikov et al., Phys. Rev. Materials 8, 043603 (2024), Eq. 7
 
@@ -63,11 +73,13 @@ Sf = S_vac_supercell - ((N-1)/N) * S_perf_supercell
 
 * **Caller:** `constants.py` (computed for use in Stage 7 `Cv.py`)
 * **Mechanics:** An analytical calculation derived directly from the linear mixture of the vacancy formation entropy computed earlier ($S_f = \sum x_i S_{f,i}$).
-* **Formula:** 
-
-```text
+* **Formula:** ```text
 C0 = exp(Sf / k_B)
 ```
+
+```
+
+
 
 > Shewmon, Diffusion in Solids. McGraw-Hill (1963)
 
@@ -81,6 +93,8 @@ C0 = exp(Sf / k_B)
 4. Releases all atoms and runs NPT at a test temperature ($T_{guess}$) with *independent* x, y, and z barostats (crucial: iso barostats destroy the solid-liquid interface).
 5. Performs stress equalization ($P_{xx} \approx P_{yy} \approx P_{zz} \approx 0$).
 6. **Diagnosis:** If volume increases, the system is melting ($T_{guess} > T_m$). If volume decreases, it is freezing ($T_{guess} < T_m$). True $T_m$ is found where volume is stable and pressure is near zero.
+
+
 
 > Karavaev et al., J. Chem. Phys. 144, 194507 (2016)
 > Zhu et al., npj Comput. Mater. 10, 60 (2024)
@@ -98,9 +112,17 @@ C0 = exp(Sf / k_B)
 3. Production MD: Deletes one atom to create a single vacancy and runs long-timescale MD under NPT.
 
 
+
 ### Mean Square Displacement (MSD)
 
 * **Caller:** `msd.py`
+* **Mechanics:** Parses LAMMPS log to extract the unwrapped distance atoms travel over time.
+```text
+MSD(t) = ⟨|r(t) - r(0)|²⟩
+
+```
+
+
 
 ---
 
@@ -110,26 +132,29 @@ C0 = exp(Sf / k_B)
 
 * **Caller:** `D2.py`, `Cv.py`
 * **Mechanics:** Extracts the macroscopic diffusion rate. Because MSD tracks the atoms directly, the BCC correlation factor ($f \approx 0.727$) is naturally included.
-1. **Vacancy Diffusivity:** 
-
-```text
+1. **Vacancy Diffusivity:** ```text
 Dv(T) = lim_{t→∞} MSD_vac(t) / 6t
+```
+
 ```
 
 
 2. **Equilibrium Vacancy Concentration:**
-
 ```text
 Cv(T) = C0 * exp(−Ef / (k_B * T))
 
 ```
 
-3. **Tracer Diffusivity (per element $i$):**
 
+3. **Tracer Diffusivity (per element $i$):**
 ```text
 D*_i(T) = Cv * Dv_i / x_i
 
 ```
+
+
+
+
 
 ---
 
@@ -139,16 +164,18 @@ D*_i(T) = Cv * Dv_i / x_i
 
 * **Caller:** `sro.py`
 * **Mechanics:** Calculates the Warren-Cowley SRO parameter based on the first two neighbor shells (BCC 1NN/2NN midpoint cutoff). Evaluates whether specific elemental pairs attract or repel.
-
 ```text
 α_ij = 1 − P_ij / x_j
 
 ```
 
+
 Where $P_{ij}$ is the conditional probability of finding $j$ next to $i$.
 * $\alpha_{ij} = 0$: Random solid solution
 * $\alpha_{ij} > 0$: Elements repel (depletion)
 * $\alpha_{ij} < 0$: Elements attract (ordering)
+
+
 
 > Cowley, Phys. Rev. 77, 669 (1950)
 
