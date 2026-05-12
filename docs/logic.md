@@ -41,7 +41,7 @@ a_0 = \sum_i x_i a_{0,i}
 * **Caller:** `compute_sf_phonopy.py`
 * **Mechanics:** Computes the vibrational entropy difference between a perfect BCC supercell and one containing a single vacancy using Phonopy.
 1. Relaxes a $6\times6\times6$ perfect supercell (432 atoms). Displaces atoms to get $S_{perf}$.
-2. Removes one atom (431 atoms). Runs Phonopy with the `--nosym` flag to calculate forces for 2,586 explicitly displaced structures (avoids point-group numerical noise). Extracts $S_{vac}$.
+2. Removes one atom (431 atoms). Runs Phonopy to calculate forces for 79-520 explicitly displaced structures (avoids point-group numerical noise). Extracts $S_{vac}$. 
 3. Evaluates entropy at $T_0$ ($300$ K for W, Mo, Nb, Ta; $1100$ K for Zr, $1200$ K for Ti to ensure BCC stability).
 
 
