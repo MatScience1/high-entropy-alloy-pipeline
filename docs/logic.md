@@ -303,3 +303,15 @@ The exact loss function applied by `Ridge(alpha=POLY_ALPHA)` is a foundational m
 
 * **Theory:** By adding the $L_2$ norm penalty ($\alpha ||\beta||_2^2$), the matrix $(X^T X + \alpha I)$ becomes strictly positive-definite and invertible, curing multicollinearity and overfitting.
 * **Citation:** Hoerl, A. E., & Kennard, R. W. (1970). *Ridge regression: Biased estimation for nonorthogonal problems*. Technometrics, 12(1), 55-67.
+
+
+<h3>Example: Global Model Prediction</h3>
+<p>
+  To predict diffusion for a specific alloy, the pipeline performs the following transformation:
+</p>
+<ul>
+  <li><b>Feature Construction:</b> For a 50/50 W-Mo alloy at 2500 K, the input vector uses <i>x</i><sub>Mo</sub>=0.5 and a normalized inverse temperature (e.g., <i>T</i><sub>norm</sub>=1.0).</li>
+  <li><b>Chemical Interaction:</b> The polynomial expansion generates a cross-term <i>x</i><sub>Mo</sub> &middot; 1/<i>T</i><sub>norm</sub>. Physically, this represents how Mo concentration modifies the activation energy <i>Q</i>.</li>
+  <li><b>Regularization:</b> Ridge regression applies an <i>L</i><sub>2</sub> penalty (&alpha;) that shrinks the coefficients of high-order interactions. This prevents MD "noise" from creating physically impossible spikes in the predicted diffusion landscape.</li>
+  <li><b>Final Result:</b> The model outputs ln(<i>D</i><sup>*</sup>), which is exponentiated to provide the final tracer diffusivity in m<sup>2</sup>/s.</li>
+</ul>
