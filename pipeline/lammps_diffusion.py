@@ -321,8 +321,8 @@ def _submit_script(comp_id: str, T: int) -> str:
 #SBATCH --nodes={SLURM_NODES}
 #SBATCH --ntasks-per-node={SLURM_TASKS_PER_NODE}
 #SBATCH --time={SLURM_WALLTIME}
-#SBATCH --output=slurm_%j.out
-#SBATCH --error=slurm_%j.err
+#SBATCH --output=logs/slurm_%j.out
+#SBATCH --error=logs/slurm_%j.err
 
 source ~/.bashrc
 eval "$(micromamba shell hook --shell bash)"

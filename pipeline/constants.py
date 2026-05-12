@@ -98,6 +98,52 @@ def sequential_fracs(comp: dict[str, float]) -> dict[str, float]:
         claimed += c
     return fracs
 
+# ══════════════════════════════════════════════════════════════════════════════
+# A0 calculation
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_a0_lammps(comp: dict[str, float], a0_guess: float) -> float:
+    """
+    Equilibrium BCC lattice parameter via box/relax at P=0.
+    EF_CELL_SIZE³×2 supercell with alloy composition assigned.
+    Returns a0 [Å]. Falls back to Vegard's law on LAMMPS failure.
+    """
+    N   = EF_CELL_SIZE   # 5 → 250 atoms
+    pot = POTENTIAL_FILE
+
+    lammps_in = f"""
+units metal
+boundary p p p
+atom_style atomic
+lattice bcc {a0_guess:.5f}
+region box block 0 {N} 0 {N} 0 {N}
+create_box 6 box
+create_atoms 1 box
+{chr(10).join(f"mass {i+1} {MASSES[e]}  # {e}" for i,e in enumerate(ELEMENTS))}
+{chr(10).join(
+    f"set group all type/fraction {ELEMENTS.index(e)+1} {f:.8f} {abs(hash(e))%90000+10000}"
+    for e,f in sequential_fracs(comp).items() if f > 1e-9
+)}
+pair_style adp
+pair_coeff * * {pot} W Mo Nb Zr Ti Ta
+fix relax all box/relax iso 0.0 vmax 0.001
+minimize 1e-12 1e-12 2000 20000
+variable a0_eq equal lx/{N}
+print "EQUILIBRIUM_A0 ${{a0_eq}}"
+"""
+    with tempfile.TemporaryDirectory(prefix="a0_") as tmp:
+        work = Path(tmp)
+        shutil.copy(pot, work / pot.name)
+        inp = work / "find_a0.in"
+        inp.write_text(lammps_in)
+        try:
+            out = _run_lammps(inp, work, timeout=120)
+            for line in out.splitlines():
+                if "EQUILIBRIUM_A0" in line:
+                    return float(line.split()[1])
+        except Exception as exc:
+            print(f"  [WARN] a0 LAMMPS failed: {exc} — using Vegard's law")
+    return a0_guess   # fallback
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Analytical estimates (no LAMMPS)
@@ -301,7 +347,9 @@ def compute_all_constants(compositions_df: pd.DataFrame) -> pd.DataFrame:
         comp    = row_to_comp(row)
         print(f"[constants] {comp_id}  active={active_elements(comp)}")
 
-        a0     = vegard_a0(comp)
+        a0_vegard = vegard_a0(comp)
+        a0        = compute_a0_lammps(comp, a0_vegard)
+        print(f"  a0: Vegard={a0_vegard:.4f} Å  LAMMPS={a0:.4f} Å")
         Tm     = linear_tm(comp)
         Sf     = composition_sf(comp)
         C0     = float(np.exp(Sf))      # C0 = exp(Sf/kB); Sf in kB units

@@ -196,7 +196,10 @@ EF_N_SITES:   int = 10 if TEST_MODE else 50
 # ══════════════════════════════════════════════════════════════════════════════
 SLURM_PARTITION:      str = "compute"
 SLURM_NODES:          int = 1
-SLURM_TASKS_PER_NODE: int = 16
+SLURM_TASKS_PER_NODE: int = 1
+SLURM_TM_TASKS_PER_NODE: int = 1   
+SLURM_TM_CPUS_PER_TASK:  int = 16  # TF uses these as OMP threads
+SLURM_CPUS_PER_TASK:    int = 16
 SLURM_WALLTIME:       str = "2:00:00"  if TEST_MODE else "12:00:00"  # ADP runs
 SLURM_WALLTIME_TM:    str = "4:00:00"  if TEST_MODE else "48:00:00"  # [Fix 3] Tm runs
 

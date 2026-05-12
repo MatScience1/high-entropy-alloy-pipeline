@@ -52,7 +52,7 @@ from config import (
     COEX_TAU_P, COEX_TAU_P_EQ, COEX_TAU_T,
     ELEMENTS, GRACE_MODEL_DIR, GRACE_TIMESTEP_PS, LAMMPS_EXE, MASSES,
     PIPELINE_DIR, RESULTS_DIR, RUNS_DIR,
-    SLURM_NODES, SLURM_PARTITION, SLURM_TASKS_PER_NODE, SLURM_WALLTIME_TM,
+    SLURM_NODES, SLURM_PARTITION, SLURM_TASKS_PER_NODE, SLURM_CPUS_PER_TASK, SLURM_WALLTIME_TM,
 )
 from pipeline.constants import make_temperature_grid, sequential_fracs
 
@@ -246,7 +246,9 @@ micromamba activate grace
 
 export GRACE_MODEL_DIR="$HOME/.cache/grace/GRACE-2L-OMAT"
 export CUDA_VISIBLE_DEVICES="-1"
-export OMP_NUM_THREADS=1
+export OMP_NUM_THREADS=16
+export TF_NUM_INTRAOP_THREADS=16
+export TF_NUM_INTEROP_THREADS=2
 export TF_INTRA_OP_PARALLELISM_THREADS=1
 export TF_INTER_OP_PARALLELISM_THREADS=1"""
 
@@ -279,10 +281,11 @@ def build_tm_array_script(job_list: list[dict], max_concurrent: int = 20) -> Non
 #SBATCH --partition={SLURM_PARTITION}
 #SBATCH --nodes={SLURM_NODES}
 #SBATCH --ntasks-per-node={SLURM_TASKS_PER_NODE}
+#SBATCH --cpus-per-task={SLURM_CPUS_PER_TASK}
 #SBATCH --time={SLURM_WALLTIME_TM}
 #SBATCH --array=0-{n - 1}%{max_concurrent}
-#SBATCH --output=Tm_%A_%a.out
-#SBATCH --error=Tm_%A_%a.err
+#SBATCH --output=logs/Tm_%A_%a.out
+#SBATCH --error=logs/Tm_%A_%a.err
 
 # ── dispatch table ────────────────────────────────────────────────────────
 declare -A JOB_PATHS
