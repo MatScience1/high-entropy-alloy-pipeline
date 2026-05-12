@@ -31,7 +31,7 @@ We calculate the equilibrium lattice parameter ($a_0$) to ensure the simulated c
 * **Fallback:** If the MD minimization fails (e.g., highly unstable phase), the system defaults to Vegard's Law (linear atomic volume mixing):
 
 ```text
-$$a_0 = \sum_i x_i a_{0,i}$$
+a_0 = \sum_i x_i a_{0,i}
 ```
 
 > Vegard, Z. Phys. 5, 17 (1921)
