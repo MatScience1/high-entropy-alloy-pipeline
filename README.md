@@ -55,7 +55,7 @@ python run_pipeline.py --from_stage 5    # parse MSD, extract D*, SRO, and plot
 
 ```
 
-See [`docs/testing.md`](https://www.google.com/search?q=docs/testing.md) for a fast cluster validation guide using `TEST_MODE`.
+See `docs/testing.md` for a fast cluster validation guide using `TEST_MODE`.
 
 ---
 
@@ -94,8 +94,6 @@ Key references:
 
 * Starikov et al. *Phys. Rev. Materials* **8**, 043603 (2024) — Ef, Sf, ADP validation
 * Karavaev et al. *J. Chem. Phys.* **144**, 194507 (2016) — modified Z-method for Tm
-* Zhu et al. *npj Comput. Mater.* **10**, 60 (2024) — MLIP for Tm calculation
-* Cowley, *Phys. Rev.* **77**, 669 (1950) — Warren-Cowley SRO parameters
 
 ---
 
@@ -113,14 +111,4 @@ All tuneable parameters live in `config.py`. Key settings:
 | `T_FRAC_MAX` | 0.80 | Upper T bound as fraction of Tm (ADP safety margin) |
 
 ---
-
-## Citation
-
-If you use this pipeline, please cite:
-
-> Starikov et al. Phys. Rev. Materials **8**, 043603 (2024)
-> Karavaev et al. J. Chem. Phys. **144**, 194507 (2016)
-> Zhu et al. npj Comput. Mater. **10**, 60 (2024)
-
-
 
