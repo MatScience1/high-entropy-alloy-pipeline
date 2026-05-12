@@ -69,8 +69,6 @@ Sf = S_vac_supercell - ((N-1)/N) * S_perf_supercell
 C0 = exp(Sf / k_B)
 ```
 
-```
-
 > Shewmon, Diffusion in Solids. McGraw-Hill (1963)
 
 ### T_m — True Melting Temperature (Phase Coexistence)
@@ -112,7 +110,9 @@ C0 = exp(Sf / k_B)
 
 * **Caller:** `D2.py`, `Cv.py`
 * **Mechanics:** Extracts the macroscopic diffusion rate. Because MSD tracks the atoms directly, the BCC correlation factor ($f \approx 0.727$) is naturally included.
-1. **Vacancy Diffusivity:** ```text
+1. **Vacancy Diffusivity:** 
+
+```text
 Dv(T) = lim_{t→∞} MSD_vac(t) / 6t
 ```
 
