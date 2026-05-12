@@ -141,27 +141,33 @@ The exact algorithmic steps—such as building an elongated supercell, freezing 
 
 ---
 
-## Stage 7 — Equilibrium Vacancy Concentration ($C_v$)
+## Stage 7 — Equilibrium Vacancy Concentration (<i>C</i><sub>v</sub>)
 
 * **Caller:** `Cv.py`
-* **Data Source:** Pulls $E_f$ and $C_0$ from `constants_all.csv` (computed analytically in Stage 2).
+* **Data Source:** Pulls <i>E</i><sub>f</sub> and <i>C</i><sub>0</sub> from `constants_all.csv` (computed analytically in Stage 2).
 * **Mechanics:** Purely analytical calculation. Evaluates the Arrhenius vacancy concentration equation across the simulation temperature grid.
-  $$C_v(T) = C_0 \cdot \exp\left(-\frac{E_f}{k_B T}\right)$$
-  *(Where $C_0 = \exp(S_f / k_B)$).*
-* **Outputs:** `Cv.txt` (Contains $T$, $1/T$, and $C_v$).
+  <br><br>
+  <i>C</i><sub>v</sub>(<i>T</i>) = <i>C</i><sub>0</sub> &middot; exp(-<i>E</i><sub>f</sub> / <i>k</i><sub>B</sub><i>T</i>)
+  <br><br>
+  *(Where <i>C</i><sub>0</sub> = exp(<i>S</i><sub>f</sub> / <i>k</i><sub>B</sub>)).*
+* **Outputs:** `Cv.txt` (Contains <i>T</i>, 1/<i>T</i>, and <i>C</i><sub>v</sub>).
 
 ---
 
-## Stage 8 — Tracer Self-Diffusion ($D^*$)
+## Stage 8 — Tracer Self-Diffusion (<i>D</i><sup>*</sup>)
 
 * **Caller:** `D2.py`
 * **Data Source:** Merges the macroscopic vacancy diffusion (`Dv.txt` from Stage 6) with the theoretical vacancy concentration (`Cv.txt` from Stage 7).
-* **Mechanics:** Calculates the true, experimentally observable tracer diffusivity for each element. Because the original $D_v$ was derived directly from the physical atomic displacement in MD, the BCC correlation factor ($f \approx 0.727$) is natively embedded in the data.
-  1. Computes per-element tracer diffusivity by dividing by the species mole fraction ($x_i$):
-     $$D^*_i(T) = \frac{C_v(T) \cdot D_{v,i}}{x_i}$$
+* **Mechanics:** Calculates the true, experimentally observable tracer diffusivity for each element. Because the original <i>D</i><sub>v</sub> was derived directly from the physical atomic displacement in MD, the BCC correlation factor (<i>f</i> &approx; 0.727) is natively embedded in the data.
+  1. Computes per-element tracer diffusivity by dividing by the species mole fraction (<i>x</i><sub>i</sub>):
+     <br><br>
+     <i>D</i><sup>*</sup><sub>i</sub>(<i>T</i>) = [ <i>C</i><sub>v</sub>(<i>T</i>) &middot; <i>D</i><sub>v,i</sub> ] / <i>x</i><sub>i</sub>
+     <br><br>
   2. Computes the total alloy tracer diffusivity:
-     $$D^*_{total} = C_v(T) \cdot \sum_i D_{v,i}$$
-  3. Fits the final Arrhenius parameters (Total activation energy $Q$ and pre-exponential $D_0$) for the actual tracer diffusion.
+     <br><br>
+     <i>D</i><sup>*</sup><sub>total</sub> = <i>C</i><sub>v</sub>(<i>T</i>) &middot; &sum;<sub>i</sub> <i>D</i><sub>v,i</sub>
+     <br><br>
+  3. Fits the final Arrhenius parameters (Total activation energy <i>Q</i> and pre-exponential <i>D</i><sub>0</sub>) for the actual tracer diffusion.
 * **Outputs:** `D2_components.txt` and Arrhenius plots (`Dtotal_vs_invT.png`).
 
 ---
@@ -229,8 +235,6 @@ Where $P_{ij}$ is the conditional probability of finding $j$ next to $i$.
     *(Where n is the number of data points, k is the number of polynomial features, and $\alpha$ is the regularization strength).*
 
 * **Why:** By using a joint composition-and-temperature fit with L2 regularization, the pipeline uses the entire statistical weight of the $100 \times N_{temps}$ simulations simultaneously. This allows smooth, stable interpolation of diffusion properties anywhere inside the 6-element High-Entropy Alloy hyperspace.
-
-Here is the exact breakdown of the code, the underlying mathematical theory, and the literature origins for the Stage 10 Polynomial Post-Processing.
 
 ---
 
