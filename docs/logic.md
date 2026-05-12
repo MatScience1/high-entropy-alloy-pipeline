@@ -116,7 +116,6 @@ C0 = exp(Sf / k_B)
 Dv(T) = lim_{t→∞} MSD_vac(t) / 6t
 ```
 
-```
 
 2. **Equilibrium Vacancy Concentration:**
 
