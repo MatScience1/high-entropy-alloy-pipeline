@@ -186,29 +186,6 @@ The exact algorithmic steps—such as building an elongated supercell, freezing 
 
 ---
 
-## Stage 9 — Short-Range Order (SRO)
-
-### Chemical Ordering
-
-* **Caller:** `sro.py`
-* **Mechanics:** Calculates the Warren-Cowley SRO parameter based on the first two neighbor shells (BCC 1NN/2NN midpoint cutoff). Evaluates whether specific elemental pairs attract or repel.
-```text
-α_ij = 1 − P_ij / x_j
-
-```
-
-
-Where $P_{ij}$ is the conditional probability of finding $j$ next to $i$.
-* $\alpha_{ij} = 0$: Random solid solution
-* $\alpha_{ij} > 0$: Elements repel (depletion)
-* $\alpha_{ij} < 0$: Elements attract (ordering)
-
-
-
-> Cowley, Phys. Rev. 77, 669 (1950)
-
----
-
 ## Stage 10 — Polynomial Post-Processing
 
 ### Global Model Fitting (Ridge Regression)
