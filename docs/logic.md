@@ -79,10 +79,6 @@ Sf = S_vac_supercell - ((N-1)/N) * S_perf_supercell
 C0 = exp(Sf / k_B)
 ```
 
-```
-
-
-
 > Shewmon, Diffusion in Solids. McGraw-Hill (1963)
 
 ### T_m — True Melting Temperature (Phase Coexistence)
