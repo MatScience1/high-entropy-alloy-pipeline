@@ -136,9 +136,6 @@ MSD(t) = ⟨|r(t) - r(0)|²⟩
 Dv(T) = lim_{t→∞} MSD_vac(t) / 6t
 ```
 
-```
-
-
 2. **Equilibrium Vacancy Concentration:**
 ```text
 Cv(T) = C0 * exp(−Ef / (k_B * T))
@@ -151,9 +148,6 @@ Cv(T) = C0 * exp(−Ef / (k_B * T))
 D*_i(T) = Cv * Dv_i / x_i
 
 ```
-
-
-
 
 
 ---
