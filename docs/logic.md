@@ -305,13 +305,31 @@ The exact loss function applied by `Ridge(alpha=POLY_ALPHA)` is a foundational m
 * **Citation:** Hoerl, A. E., & Kennard, R. W. (1970). *Ridge regression: Biased estimation for nonorthogonal problems*. Technometrics, 12(1), 55-67.
 
 
-<h3>Example: Global Model Prediction</h3>
-<p>
-  To predict diffusion for a specific alloy, the pipeline performs the following transformation:
-</p>
-<ul>
-  <li><b>Feature Construction:</b> For a 50/50 W-Mo alloy at 2500 K, the input vector uses <i>x</i><sub>Mo</sub>=0.5 and a normalized inverse temperature (e.g., <i>T</i><sub>norm</sub>=1.0).</li>
-  <li><b>Chemical Interaction:</b> The polynomial expansion generates a cross-term <i>x</i><sub>Mo</sub> &middot; 1/<i>T</i><sub>norm</sub>. Physically, this represents how Mo concentration modifies the activation energy <i>Q</i>.</li>
-  <li><b>Regularization:</b> Ridge regression applies an <i>L</i><sub>2</sub> penalty (&alpha;) that shrinks the coefficients of high-order interactions. This prevents MD "noise" from creating physically impossible spikes in the predicted diffusion landscape.</li>
-  <li><b>Final Result:</b> The model outputs ln(<i>D</i><sup>*</sup>), which is exponentiated to provide the final tracer diffusivity in m<sup>2</sup>/s.</li>
-</ul>
+### Complete Pipeline Example: From MD Runs to Global Prediction
+
+To understand how the pipeline bridges raw Molecular Dynamics (MD) to a generalized predictive model, consider the lifecycle of predicting tracer diffusion for an arbitrary alloy (e.g., 50% W, 50% Mo) at an arbitrary temperature (e.g., 2500 K).
+
+#### 1. Discrete Simulations (Stages 4 to 8)
+For a specific composition (e.g., <i>x</i><sub>W</sub> = 0.5, <i>x</i><sub>Mo</sub> = 0.5), the pipeline runs MD simulations at 10 discrete temperatures (e.g., 1800 K, 1900 K, ... 2700 K). 
+* Stage 6 extracts the physical vacancy displacement slope at each temperature to find 10 discrete <i>D</i><sub>v</sub> values.
+* Stage 8 calculates the true tracer diffusivity to yield 10 discrete <i>D</i><sup>*</sup> values. 
+* It then fits an Arrhenius line through these 10 points to extract a **single <i>D</i><sub>0</sub> and <i>Q</i>** specifically for this exact 50/50 alloy.
+
+#### 2. Data Aggregation (Stage 10 - Step A)
+If the analysis stopped at Stage 8, predicting the behavior of a brand new, untested composition would be impossible. To fix this, Stage 10 pools the 10 data points from the 50/50 W-Mo alloy together with the data points from the other 99 simulated compositions. 
+* This creates a unified dataset of **1,000 discrete data points**. 
+* Each row contains the composition, the simulated temperature, and the resulting diffusivity: <br>
+  <code>[<i>x</i><sub>Mo</sub>, <i>x</i><sub>Nb</sub>, <i>x</i><sub>Zr</sub>, <i>x</i><sub>Ti</sub>, <i>x</i><sub>Ta</sub>, 1/<i>T</i>] &rarr; ln(<i>D</i><sup>*</sup>)</code>
+
+#### 3. Global Model Training (Stage 10 - Step B)
+The pipeline feeds all 1,000 rows into a Scikit-Learn Machine Learning pipeline.
+* **Polynomial Expansion:** It generates cross-terms (e.g., <i>x</i><sub>Mo</sub> &middot; 1/<i>T</i><sub>norm</sub>) to mathematically capture how adding specific elements alters the activation energy slope.
+* **Ridge Regularization:** It applies an <i>L</i><sub>2</sub> penalty (&alpha;) to the polynomial coefficients. This prevents the equation from twisting itself to fit the inherent "noise" of individual MD runs, forcing it to learn the smooth, underlying physical thermodynamics.
+* **Result:** The 1,000 discrete points are transformed into a **single, continuous global master equation**.
+
+#### 4. The Final Prediction (Stage 10 - Step C)
+Now, the continuous equation can answer queries for un-simulated scenarios. 
+To predict diffusion for 50% W / 50% Mo at exactly 2500 K:
+* The input vector is generated: <code>[0.5, 0.0, 0.0, 0.0, 0.0, 1/2500<sub>norm</sub>]</code>
+* The global polynomial computes the complex interactions across all weights.
+* The model outputs the final predicted ln(<i>D</i><sup>*</sup>), seamlessly interpolating between the discrete temperatures and compositions it was trained on.
