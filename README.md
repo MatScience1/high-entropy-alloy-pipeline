@@ -1,4 +1,3 @@
-```markdown
 # WMoNbZrTiTa Diffusion Pipeline
 
 High-throughput MD pipeline for computing vacancy-mediated tracer diffusivities,
