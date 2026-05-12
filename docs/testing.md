@@ -113,7 +113,7 @@ python pipeline/compute_sf_phonopy.py --elements W
 [W] T0=300 K  a0=3.18642 Å  N=432
   [perfect] 1 displaced structures
   [perfect] S = 1824.6412 kB/supercell at 300 K
-  [vacancy] 2586 displaced structures
+  [vacancy] 79 displaced structures
 ...
 === Sf_phonopy results ===
   W: X.XXXX kB
