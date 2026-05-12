@@ -122,6 +122,5 @@ If you use this pipeline, please cite:
 > Karavaev et al. J. Chem. Phys. **144**, 194507 (2016)
 > Zhu et al. npj Comput. Mater. **10**, 60 (2024)
 
-```
 
 
