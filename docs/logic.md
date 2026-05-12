@@ -101,7 +101,7 @@ The exact algorithmic steps—such as building an elongated supercell, freezing 
 
 ---
 
-## Stage 4 & 5 — Diffusion
+## Stage 4 — Diffusion
 
 ### MD Diffusion Run
 
