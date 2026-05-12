@@ -93,6 +93,8 @@ C0 = exp(Sf / k_B)
 6. **Diagnosis:** If volume increases, the system is melting ($T_{guess} > T_m$). If volume decreases, it is freezing ($T_{guess} < T_m$). True $T_m$ is found where volume is stable and pressure is near zero.
 
 
+The exact algorithmic steps—such as building an elongated supercell, freezing the solid half, heating the liquid half to $2 \times T_{m,ROM}$, and diagnosing melting/freezing via volume changes—are the practical molecular dynamics implementations of the solid-liquid coexistence method. These mechanical steps are coded directly in lammps_tm.py to satisfy the physical and thermodynamic requirements established by the quoted literature.
+
 
 > Karavaev et al., J. Chem. Phys. 144, 194507 (2016)
 > Zhu et al., npj Comput. Mater. 10, 60 (2024)
@@ -201,3 +203,96 @@ Where $P_{ij}$ is the conditional probability of finding $j$ next to $i$.
     *(Where n is the number of data points, k is the number of polynomial features, and $\alpha$ is the regularization strength).*
 
 * **Why:** By using a joint composition-and-temperature fit with L2 regularization, the pipeline uses the entire statistical weight of the $100 \times N_{temps}$ simulations simultaneously. This allows smooth, stable interpolation of diffusion properties anywhere inside the 6-element High-Entropy Alloy hyperspace.
+
+Here is the exact breakdown of the code, the underlying mathematical theory, and the literature origins for the Stage 10 Polynomial Post-Processing.
+
+---
+
+### 1. The Physics Foundation: Why these variables?
+
+Before applying Machine Learning, the code transforms the physical parameters into a mathematically linear format. The foundation of this is the **Arrhenius Equation** for diffusion:
+
+
+$$D^* = D_0 \exp\left(-\frac{Q}{k_B T}\right)$$
+
+Taking the natural logarithm of both sides linearizes the relationship with respect to temperature:
+
+
+$$\ln(D^*) = \ln(D_0) - \left(\frac{Q}{k_B}\right) \frac{1}{T}$$
+
+In a pure metal, $\ln(D_0)$ and $Q$ are constants. However, in a High-Entropy Alloy (HEA), the prefactor ($D_0$) and the activation energy ($Q$) are highly complex, unknown functions of the composition fractions ($x_i$).
+
+Instead of fitting separate Arrhenius lines for every single composition, Stage 10 fits a **single, global polynomial model** that captures how composition *modifies* both the intercept and the slope of that line.
+
+### 2. Exact Code Breakdown (`analysis/postprocess.py`)
+
+#### A. Dimensionality Reduction (The Dummy Variable Trap)
+
+```python
+comp_feat_cols = [f"x_{e}" for e in ELEMENTS_ALL if e != "W"]
+
+```
+
+**What is happening:** The code drops Tungsten (`W`) from the feature list.
+**The Theory:** Because the mole fractions must sum to 100% ($\sum x_i = 1$), the 6 variables are linearly dependent ($x_W = 1 - x_{Mo} - x_{Nb} - x_{Zr} - x_{Ti} - x_{Ta}$). In statistical modeling, feeding perfectly correlated variables into a regression causes the matrix inversion to fail (multicollinearity, or the "Dummy Variable Trap"). Dropping one element projects the data onto a set of 5 truly independent coordinates.
+
+#### B. Feature Engineering (Normalization)
+
+```python
+inv_T = 1.0 / sub["T"].values
+inv_T_mean = inv_T.mean()
+sub["inv_T_norm"] = inv_T / inv_T_mean
+
+```
+
+**What is happening:** The inverse temperature ($1/T$) is divided by the mean of all inverse temperatures in the dataset.
+**The Theory:** Machine learning models (especially those with L2 regularization) are highly sensitive to feature scaling. Compositions range from `0.0` to `1.0`, but $1/T$ values are on the order of `0.0003`. If left unscaled, the polynomial cross-terms would be infinitesimally small, causing the Ridge regression to improperly penalize the temperature weights. Normalizing centers the temperature feature around `1.0`.
+
+#### C. The ML Pipeline (Polynomial Expansion & Ridge)
+
+```python
+X = sub[feat_cols].values
+y = np.log(sub[target].values)
+
+model = make_pipeline(
+    PolynomialFeatures(degree=POLY_DEGREE, include_bias=False),
+    Ridge(alpha=POLY_ALPHA),
+)
+model.fit(X, y)
+
+```
+
+**What is happening:** The code feeds the 6D array ($x_{Mo}, x_{Nb}, x_{Zr}, x_{Ti}, x_{Ta}, 1/T_{norm}$) into a standard `scikit-learn` pipeline.
+**The Theory:** 1. **`PolynomialFeatures`**: If `POLY_DEGREE = 2`, this step automatically generates all squares ($x_{Mo}^2$) and cross-products ($x_{Mo} \cdot x_{Ti}$, $x_{Nb} \cdot 1/T_{norm}$).
+
+* *Physical interpretation:* A cross-term like $x_{Mo} \cdot x_{Ti}$ represents the **binary chemical interaction** between Molybdenum and Titanium and how it alters the diffusion energy landscape. A term like $x_{Mo} \cdot 1/T_{norm}$ represents how adding Molybdenum changes the activation energy slope $Q$.
+
+2. **`Ridge`**: Fits the equation by minimizing the Mean Squared Error *plus* a penalty term ($\alpha \sum \beta^2$).
+* *Physical interpretation:* A degree-3 polynomial of 6 variables creates over 80 features. With only 300 data points (100 compositions $\times$ 3 temperatures), standard Ordinary Least Squares (OLS) would wildly overfit the MD noise. Ridge regularization mathematically forces the coefficients of less important chemical interactions close to zero, ensuring the model remains smooth and physically predictive between the sampled data points.
+
+
+
+---
+
+### 3. Origins of the Theory & Literature Citations
+
+#### 1. Polynomials for Mixture Thermodynamics (CALPHAD)
+
+The logic of using polynomial expansions to describe the complex properties of multicomponent mixtures comes from the **CALPHAD (CALculation of PHAse Diagrams)** methodology. Specifically, it mirrors the **Redlich-Kister polynomial** approach.
+
+* **Theory:** In CALPHAD, the excess Gibbs free energy of mixing is modeled as a polynomial sum of pure components, binary interactions, and ternary interactions. The pipeline's use of `PolynomialFeatures` is a machine-learning equivalent of building a multi-dimensional Redlich-Kister expansion for the activation free energy of diffusion.
+* **Citation:** Redlich, O., & Kister, A. T. (1948). *Algebraic representation of thermodynamic properties and the classification of solutions*. Industrial & Engineering Chemistry, 40(2), 345-348.
+
+#### 2. Arrhenius Behavior in High-Entropy Alloys
+
+The premise that tracer diffusivity in complex concentrated alloys still fundamentally obeys a macroscopic Arrhenius relationship (allowing us to fit $\ln(D)$ vs $1/T$) is established in the literature provided in your context.
+
+* **Theory:** While local atomic jumps in an HEA have wildly varying energy barriers, the *macroscopic* tracer diffusion averages out into a predictable Arrhenius slope at high temperatures.
+* **Citation:** Starikov, S., Grigorev, P., Drautz, R., & Divinski, S. V. (2024). *Large-scale atomistic simulation of diffusion in refractory metals and alloys*. Physical Review Materials, 8, 043603. (As seen in the provided PDF, defining the transition of diffusion behavior in CCAs).
+
+#### 3. Ridge Regularization (Tikhonov Regularization)
+
+The exact loss function applied by `Ridge(alpha=POLY_ALPHA)` is a foundational mathematical technique to solve ill-posed problems (like fitting 80 variables to 300 noisy MD data points).
+
+* **Theory:** By adding the $L_2$ norm penalty ($\alpha ||\beta||_2^2$), the matrix $(X^T X + \alpha I)$ becomes strictly positive-definite and invertible, curing multicollinearity and overfitting.
+* **Citation:** Hoerl, A. E., & Kennard, R. W. (1970). *Ridge regression: Biased estimation for nonorthogonal problems*. Technometrics, 12(1), 55-67.
