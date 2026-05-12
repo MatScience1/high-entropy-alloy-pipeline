@@ -7,11 +7,12 @@
 #SBATCH --job-name=Tm_coex
 #SBATCH --partition=compute
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
 #SBATCH --time=4:00:00
 #SBATCH --array=0-14%20
-#SBATCH --output=Tm_%A_%a.out
-#SBATCH --error=Tm_%A_%a.err
+#SBATCH --output=logs/Tm_%A_%a.out
+#SBATCH --error=logs/Tm_%A_%a.err
 
 # ── dispatch table ────────────────────────────────────────────────────────
 declare -A JOB_PATHS
@@ -54,7 +55,9 @@ micromamba activate grace
 
 export GRACE_MODEL_DIR="$HOME/.cache/grace/GRACE-2L-OMAT"
 export CUDA_VISIBLE_DEVICES="-1"
-export OMP_NUM_THREADS=1
+export OMP_NUM_THREADS=16
+export TF_NUM_INTRAOP_THREADS=16
+export TF_NUM_INTEROP_THREADS=2
 export TF_INTRA_OP_PARALLELISM_THREADS=1
 export TF_INTER_OP_PARALLELISM_THREADS=1
 

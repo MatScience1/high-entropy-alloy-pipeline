@@ -73,7 +73,9 @@ Sf = S_vac_supercell - ((N-1)/N) * S_perf_supercell
 
 * **Caller:** `constants.py` (computed for use in Stage 7 `Cv.py`)
 * **Mechanics:** An analytical calculation derived directly from the linear mixture of the vacancy formation entropy computed earlier ($S_f = \sum x_i S_{f,i}$).
-* **Formula:** ```text
+* **Formula:** 
+
+```text
 C0 = exp(Sf / k_B)
 ```
 
