@@ -204,6 +204,6 @@ Where $P_{ij}$ is the conditional probability of finding $j$ next to $i$.
     ```text
     L(β) = Σ_n [ ln(D*_total, n) - predicted_n ]² + α * Σ_k (β_k)²
     ```
-    *(Where $n$ is the number of data points, $k$ is the number of polynomial features, and $\alpha$ is the regularization strength).*
+    *(Where n is the number of data points, k is the number of polynomial features, and $\alpha$ is the regularization strength).*
 
 * **Why:** By using a joint composition-and-temperature fit with L2 regularization, the pipeline uses the entire statistical weight of the $100 \times N_{temps}$ simulations simultaneously. This allows smooth, stable interpolation of diffusion properties anywhere inside the 6-element High-Entropy Alloy hyperspace.
