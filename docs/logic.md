@@ -190,7 +190,7 @@ The exact algorithmic steps—such as building an elongated supercell, freezing 
 
 ### Global Model Fitting (Ridge Regression)
 * **Caller:** `postprocess.py`
-* **Mechanics:** Aggregates tracer diffusivity ($D^*_{total}$) data across all 100 compositions and simulated temperatures into a single unified dataset. Fits a machine learning regression model to predict diffusion based on alloy makeup and temperature.
+* **Mechanics:** Aggregates tracer diffusivity ($D^*_{total}$) data across all 100 compositions and simulated temperatures into a single unified dataset. Fits a machine learning (Linear Regression with a safety net (Regularization)) regression model to predict diffusion based on alloy makeup and temperature.
   1. **Dimensionality Reduction:** Drops one element (W) from the inputs. Because mole fractions sum to 1 ($\sum x_i = 1$), including all 6 elements causes perfect multicollinearity. 
   2. **Feature Engineering:** Creates a 6-dimensional input vector $\mathbf{x}$ for every data point, combining the 5 independent compositions and a normalized inverse temperature (to keep numerical scaling stable).
   3. **Polynomial Expansion:** Generates higher-order terms (squares, cross-products) up to `POLY_DEGREE` to capture non-linear chemical interactions (e.g., how adding Mo and Ti *together* affects diffusion differently than adding them separately).
