@@ -305,9 +305,9 @@ The exact loss function applied by `Ridge(alpha=POLY_ALPHA)` is a foundational m
 * **Citation:** Hoerl, A. E., & Kennard, R. W. (1970). *Ridge regression: Biased estimation for nonorthogonal problems*. Technometrics, 12(1), 55-67.
 
 
-### Complete Pipeline Example: From MD Runs to Global Prediction
+### 4. Complete Pipeline Example: From MD Runs to Global Prediction
 
-To understand how the pipeline bridges raw Molecular Dynamics (MD) to a generalized predictive model, consider the lifecycle of predicting tracer diffusion for an arbitrary alloy (e.g., 50% W, 50% Mo) at an arbitrary temperature (e.g., 2500 K).
+Predicting tracer diffusion for an arbitrary alloy (e.g., 50% W, 50% Mo) at an arbitrary temperature (e.g., 2500 K).
 
 #### 1. Discrete Simulations (Stages 4 to 8)
 For a specific composition (e.g., <i>x</i><sub>W</sub> = 0.5, <i>x</i><sub>Mo</sub> = 0.5), the pipeline runs MD simulations at 10 discrete temperatures (e.g., 1800 K, 1900 K, ... 2700 K). 
