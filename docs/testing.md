@@ -13,7 +13,7 @@ ls WMoNbZrTiTa.nist.adp.txt      # must exist in project root
 ls pipeline/ analysis/ config.py run_pipeline.py
 
 # Confirm Python packages
-pip install -r requirements.txt
+make setup            # or: pip install -r requirements.txt
 
 # Confirm LAMMPS and Phonopy are in PATH on a compute node (not login node)
 srun --partition=compute --pty bash -c "which lmp && which phonopy"
@@ -24,11 +24,12 @@ srun --partition=compute --pty bash -c "which lmp && which phonopy"
 
 ## 1. Enable TEST_MODE
 
-In `config.py`, set:
+`TEST_MODE` defaults to `False`. Enable the fast validation configuration
+either by passing `--test` on the command line or by setting
+`TEST_MODE = True` in `config.py`:
 
-```python
-TEST_MODE = True
-
+```bash
+python run_pipeline.py --test --from_stage 0 --to_stage 2
 ```
 
 This gives: 5 compositions, 3 temperatures each, short MC/MD runs, 3 T_guess
@@ -329,10 +330,11 @@ ls results/comp_000/sim_x/
 
 ```
 
-**Stage 8 check:** verify Arrhenius R² is reasonable:
+**Stage 8 check:** verify the tracer-diffusion output exists and that the
+Arrhenius R² reported in the stage log is reasonable:
 
 ```bash
-grep 'R2\|r2\|rsq' results/comp_000/txt/D2_*.txt | head -10
+ls results/comp_000/txt/D2_components.txt
 # R² > 0.95 expected; < 0.90 indicates MSD not converged at low T
 
 ```

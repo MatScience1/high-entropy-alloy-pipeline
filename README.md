@@ -1,114 +1,346 @@
 # WMoNbZrTiTa Diffusion Pipeline
 
-High-throughput MD pipeline for computing vacancy-mediated tracer diffusivities,
-short-range order, and melting temperatures across 100 W-Mo-Nb-Zr-Ti-Ta
-refractory high-entropy alloy compositions.
+High-throughput molecular-dynamics pipeline for computing vacancy-mediated
+tracer diffusivities, short-range order, and melting temperatures across
+W-Mo-Nb-Zr-Ti-Ta refractory high-entropy alloy compositions.
 
 ---
 
-## What this does
+## Overview
 
-For each of 100 alloy compositions uniformly sampled from the 6-element composition space, this pipeline automates the following physics calculations:
+For each alloy composition sampled from the six-element composition space, the
+pipeline automates the following calculations:
 
-1. **Pure Element Baselines:** Computes exact ADP-relaxed lattice parameters ($a_0$) and vacancy formation entropies ($S_f$) via Phonopy.
-2. **Alloy Constants:** Computes alloy formation energies ($E_f$) and preliminary Rule-of-Mixtures constants.
-3. **True Melting Temperature ($T_m$):** Determines phase coexistence via the Modified Z-method using the high-fidelity **GRACE-2L-OMAT MLIP**.
-4. **Diffusion & SRO:** Runs Monte Carlo (MC) chemical equilibration followed by long **MD diffusion** with a single vacancy using the fast **ADP potential** (432-atom BCC supercell).
-5. **Tracer Diffusivity ($D^*_i$):** Extracts per-element diffusion rates via the Einstein relation and fits Arrhenius parameters ($D_{0,i}$, $Q_i$).
-6. **Chemical Ordering:** Computes Warren-Cowley Short-Range Order (SRO) parameters $\alpha_{ij}(T)$.
-7. **Global Predictive Model:** Fits a Ridge-regularized composition-property polynomial across all 100 alloys to predict diffusion across the entire hyperspace.
+1. **Pure-element baselines** - ADP-relaxed lattice parameters and vacancy
+   formation entropies via phonopy.
+2. **Alloy constants** - vacancy formation energy, rule-of-mixtures melting
+   temperature, and the temperature grid.
+3. **True melting temperature** - phase coexistence via the Modified Z-method
+   using the GRACE-2L-OMAT machine-learning potential.
+4. **Diffusion and SRO** - Monte Carlo chemical equilibration followed by long
+   MD diffusion with a single vacancy, using the fast ADP potential.
+5. **Tracer diffusivity** - per-element diffusion rates via the Einstein
+   relation and Arrhenius fits.
+6. **Chemical ordering** - Warren-Cowley short-range order parameters.
+7. **Global predictive model** - a Ridge-regularised composition-property
+   polynomial fitted across all compositions.
 
 ---
 
-## Quick start
+## Architecture
 
-```bash
-git clone [https://github.com/akmal523/high-entropy-alloy-pipeline.git](https://github.com/akmal523/high-entropy-alloy-pipeline.git)
-cd WMoNbZrTiTa
-pip install -r requirements.txt
+The codebase is split into two strictly separated layers:
 
-# Edit config.py — set LAMMPS_EXE, SLURM_PARTITION, GRACE_MODEL_DIR, etc.
+| Layer | Directory | Responsibility |
+| --- | --- | --- |
+| Generation | `pipeline/` | Build LAMMPS and phonopy inputs (Stages 1-4) |
+| Post-processing | `analysis/` | Parse outputs and compute physics (Stages 5-10) |
 
-python run_pipeline.py --only_stage 0    # validate environment
-python run_pipeline.py --only_stage 1    # generate 100 compositions
+Supporting modules:
 
-# Compute pure-element reference data (Sf, a0)
-python pipeline/compute_sf_phonopy.py
+| Module | Responsibility |
+| --- | --- |
+| `config.py` | Single source of truth for constants, paths, and mode |
+| `run_pipeline.py` | Orchestrator and unified CLI entry point |
+| `logging_config.py` | Central logging configuration |
+| `reporting.py` | Aligned plain-text table rendering |
 
-# Compute alloy constants (Ef, Tm_rom)
-python run_pipeline.py --only_stage 2
+`pipeline/` never reads simulation output, and `analysis/` never writes LAMMPS
+input. The only shared state is the file system, described below.
 
-# Generate and submit Tm jobs (GRACE MLIP)
-python run_pipeline.py --only_stage 31
-sbatch slurm/submit_Tm_array.sh          # submit to cluster
+---
 
-# [wait for Tm jobs to finish]
-python run_pipeline.py --only_stage 32   # patch real Tm into constants
-
-# Generate and submit diffusion jobs (ADP)
-python run_pipeline.py --only_stage 3
-python run_pipeline.py --only_stage 4
-sbatch slurm/submit_diffusion.sh         # submit to cluster
-
-# [wait for diffusion jobs to finish]
-python run_pipeline.py --from_stage 5    # parse MSD, extract D*, SRO, and plot
+## Data flow
 
 ```
-
-See `docs/testing.md` for a fast cluster validation guide using `TEST_MODE`.
-
----
-
-## Requirements
-
-* Python ≥ 3.10
-* LAMMPS with ADP pair style (`pair_style adp`)
-* LAMMPS with GRACE pair style (for Tm runs)
-* Phonopy (for vibrational entropy calculations)
-* GRACE-2L-OMAT model weights
-* `WMoNbZrTiTa.nist.adp.txt` potential file (place in project root)
-* SLURM cluster environment
+config.py  (constants, paths, TEST_MODE)
+    |
+    v
+[Stage 1]  pipeline/compositions.py
+    |         -> results/compositions.csv
+    v
+[Stage 2]  pipeline/constants.py
+    |         -> results/constants_all.csv
+    |         -> results/constants/<comp_id>.json
+    v
+[Stage 3b] pipeline/lammps_tm.py
+    |         -> runs/<comp_id>/tm_coexistence/T_<guess>/coexistence.in
+    |         -> slurm/submit_Tm_array.sh
+    |   (sbatch; GRACE MLIP)
+    v
+[Stage 3c] pipeline/lammps_tm.py
+    |         -> results/constants_all.csv   (real Tm, rebuilt T_grid)
+    v
+[Stage 3]  pipeline/lammps_diffusion.py
+    |         -> runs/<comp_id>/sim_<T>/bcc_vac_adv.in
+    |         -> results/job_list.csv
+    v
+[Stage 4]  run_pipeline.py
+    |         -> slurm/submit_diffusion.sh
+    |   (sbatch; ADP potential)
+    v
+[Stage 5]  analysis/msd.py
+    |         -> results/<comp_id>/sim_x/<T>/msd_all.txt
+    |         -> results/<comp_id>/sim_x/<T>/msd_solo.txt
+    v
+[Stage 6]  analysis/vacancy_diffusion.py
+    |         -> results/<comp_id>/txt/Dv.txt
+    v
+[Stage 7]  analysis/vacancy_concentration.py
+    |         -> results/<comp_id>/txt/Cv.txt
+    v
+[Stage 8]  analysis/tracer_diffusion.py
+    |         -> results/<comp_id>/txt/D2_components.txt
+    v
+[Stage 9]  analysis/sro.py
+    |         -> results/<comp_id>/txt/sro_vs_temp.csv
+    v
+[Stage 10] analysis/postprocess.py
+              -> results/master_results.csv
+              -> results/poly_fit_coeffs.csv
+              -> results/plots/*.png
+```
 
 ---
 
 ## Repository layout
 
 ```
-config.py              Central configuration — edit before running
-run_pipeline.py        Orchestrator — single entry point
-pipeline/              LAMMPS & Phonopy input generation (Stages 1–4)
-analysis/              Post-processing & Analytics (Stages 5–10)
-docs/                  Physics logic, testing guides, and derivations
-slurm/                 Cluster submission scripts (generated + static)
+config.py                  Central configuration - edit before running
+run_pipeline.py            Orchestrator and unified CLI entry point
+logging_config.py          Central logging configuration
+reporting.py               Aligned plain-text table rendering
+pyproject.toml             Packaging metadata and pinned dependencies
+requirements.txt           Locked dependency list
+Makefile                   Workflow shortcuts
 
+pipeline/                  LAMMPS and phonopy input generation
+    lammps_common.py       Shared composition algebra and LAMMPS blocks
+    compositions.py        Stage 1  - composition sampling
+    constants.py           Stage 2  - a0, Tm_rom, Ef, Sf, C0, T_grid
+    lammps_diffusion.py    Stage 3  - ADP diffusion inputs
+    lammps_tm.py           Stage 3b/3c - GRACE coexistence inputs, Tm patch
+    compute_sf_phonopy.py  Standalone phonopy Sf calculation
+
+analysis/                  Post-processing and analytics
+    logparse.py            Shared LAMMPS text-parsing helpers
+    arrhenius.py           Weighted Arrhenius fitting
+    msd.py                 Stage 5  - mean-square displacement
+    vacancy_diffusion.py   Stage 6  - Dv(T)
+    vacancy_concentration.py Stage 7 - Cv(T)
+    tracer_diffusion.py    Stage 8  - D*(T)
+    sro.py                 Stage 9  - Warren-Cowley parameters
+    postprocess.py         Stage 10 - aggregation, fit, plots
+
+docs/                      Physics, logic, workflow, and testing guides
+slurm/                     Cluster submission scripts (generated + static)
+tests/                     pytest suite
+```
+
+---
+
+## Installation
+
+```bash
+git clone https://github.com/akmal523/high-entropy-alloy-pipeline.git
+cd high-entropy-alloy-pipeline
+
+# Editable install with pinned dependencies and the test runner
+make setup
+```
+
+`make setup` runs `pip install -e ".[dev]"`. To install only the runtime
+dependencies, use `pip install -r requirements.txt`.
+
+Before running, edit `config.py` to set `LAMMPS_EXE`, `LAMMPS_CMD_TMPL`,
+`SLURM_PARTITION`, and `GRACE_MODEL_DIR`, and place
+`WMoNbZrTiTa.nist.adp.txt` in the project root.
+
+---
+
+## Quick start
+
+The `Makefile` wraps the common workflow:
+
+```bash
+make generate            # Stages 0-2: validate, compositions, constants
+make tm-inputs           # Stage 3b: write GRACE coexistence inputs
+make submit-tm           # sbatch slurm/submit_Tm_array.sh
+# [wait for Tm jobs]
+make tm-patch            # Stage 3c: patch real Tm into constants
+make diffusion-inputs    # Stages 3-4: write ADP inputs and submit script
+make submit              # sbatch slurm/submit_diffusion.sh
+# [wait for diffusion jobs]
+make analyze             # Stages 5-10: MSD, Dv, Cv, D*, SRO, postprocess
+```
+
+The equivalent direct commands are:
+
+```bash
+python run_pipeline.py --from_stage 0 --to_stage 2
+python run_pipeline.py --only_stage 31
+sbatch slurm/submit_Tm_array.sh
+python run_pipeline.py --only_stage 32
+python run_pipeline.py --from_stage 3 --to_stage 4
+sbatch slurm/submit_diffusion.sh
+python run_pipeline.py --from_stage 5
+```
+
+A fast validation run uses the reduced configuration:
+
+```bash
+make generate TEST=1
+# or
+python run_pipeline.py --test --from_stage 0 --to_stage 2
+```
+
+---
+
+## Configuration
+
+All tuneable parameters live in `config.py`.
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `TEST_MODE` | `False` | Full production run; override with `--test` |
+| `N_COMPOSITIONS` | 100 | Number of alloy compositions to sample |
+| `LAMMPS_EXE` | (set this) | Path to the LAMMPS binary |
+| `GRACE_MODEL_DIR` | (set this) | Path to the GRACE-2L-OMAT weights |
+| `SLURM_PARTITION` | `compute` | Cluster partition name |
+| `T_FRAC_MAX` | 0.80 | Upper temperature bound as a fraction of Tm |
+
+`TEST_MODE` defaults to `False`. It can be overridden at runtime, before any
+stage executes, with the `--test` flag (or forced back with `--production`).
+The mode switch changes only sampling counts, run lengths, and walltimes;
+physical constants are never modified.
+
+---
+
+## Stage reference
+
+| Stage | Module | Output |
+| --- | --- | --- |
+| 0 | `run_pipeline.py` | Environment validation |
+| 1 | `pipeline/compositions.py` | `results/compositions.csv` |
+| 2 | `pipeline/constants.py` | `results/constants_all.csv` |
+| 3b | `pipeline/lammps_tm.py` | `runs/*/tm_coexistence/`, `slurm/submit_Tm_array.sh` |
+| 3c | `pipeline/lammps_tm.py` | Patched `results/constants_all.csv` |
+| 3 | `pipeline/lammps_diffusion.py` | `runs/*/sim_*/bcc_vac_adv.in` |
+| 4 | `run_pipeline.py` | `slurm/submit_diffusion.sh` |
+| 5 | `analysis/msd.py` | `results/*/sim_x/*/msd_*.txt` |
+| 6 | `analysis/vacancy_diffusion.py` | `results/*/txt/Dv.txt` |
+| 7 | `analysis/vacancy_concentration.py` | `results/*/txt/Cv.txt` |
+| 8 | `analysis/tracer_diffusion.py` | `results/*/txt/D2_components.txt` |
+| 9 | `analysis/sro.py` | `results/*/txt/sro_vs_temp.csv` |
+| 10 | `analysis/postprocess.py` | `results/master_results.csv`, plots |
+
+---
+
+## Output file structure
+
+```
+results/
+    compositions.csv
+    constants_all.csv
+    tm_job_list.csv
+    job_list.csv
+    master_results.csv
+    poly_fit_coeffs.csv
+    constants/
+        <comp_id>.json
+    <comp_id>/
+        txt/
+            Dv.txt
+            Cv.txt
+            D2_components.txt
+            sro_vs_temp.csv
+        plots/
+            Dv_total.png
+            Dv_elements.png
+            Dv_homologous.png
+            cv_vs_invT_<comp_id>.png
+            D2_vs_invT.png
+            Dtotal_vs_invT.png
+            sro_vs_temp.png
+        sim_x/
+            <T>/
+                msd_all.txt
+                msd_solo.txt
+    plots/
+        comparison_D_vs_Tm.png
+        comparison_sro_vs_T.png
+        parity_Dtotal.png
+        arrhenius_summary.png
+
+runs/
+    <comp_id>/
+        sim_<T>/
+            bcc_vac_adv.in
+            submit.sh
+            dump/
+        tm_coexistence/
+            T_<guess>/
+                coexistence.in
+                dump/
 ```
 
 ---
 
 ## Physics notes
 
-All pipeline architecture, math, and stage-by-stage workflows are detailed in
-[`docs/logic.md`](https://www.google.com/search?q=docs/logic.md).
+The full derivations, with citations, are in [`docs/physics.md`](docs/physics.md)
+and [`docs/logic.md`](docs/logic.md). Key points:
+
+* **Sequential-fraction composition assignment.** LAMMPS
+  `set type/fraction` is applied sequentially and overwrites earlier types.
+  The conditional fractions are obtained by inverting
+  `P(X) = f_X * prod_{Y after X} (1 - f_Y)` in reverse setting order. See
+  [`pipeline/lammps_common.py`](pipeline/lammps_common.py).
+* **Modified Z-method.** An elongated BCC supercell is split into solid and
+  liquid halves; coexistence is detected from the volume and pressure
+  trajectory under independent per-axis NPT barostats, followed by stress
+  equalization. See [`pipeline/lammps_tm.py`](pipeline/lammps_tm.py).
+* **Dynamic SRO cutoff.** The cutoff is the midpoint between the BCC first and
+  second neighbour shells, `r_sro = a0 * (sqrt(3)/2 + 1) / 2`, evaluated at
+  the composition's lattice parameter. See [`config.py`](config.py).
+* **Tracer versus vacancy diffusion.** `Dv` is the vacancy diffusivity;
+  `D*_i = f_i * Cv * Dv_i / x_i` is the tracer diffusivity. The BCC
+  correlation factor `f = 0.727` is already embedded in the MSD-derived data
+  and must not be applied twice. See
+  [`analysis/tracer_diffusion.py`](analysis/tracer_diffusion.py).
 
 Key references:
 
-* Starikov et al. *Phys. Rev. Materials* **8**, 043603 (2024) — Ef, Sf, ADP validation
-* Karavaev et al. *J. Chem. Phys.* **144**, 194507 (2016) — modified Z-method for Tm
+* Starikov et al. *Phys. Rev. Materials* **8**, 043603 (2024) - Ef, Sf, ADP
+  validation.
+* Karavaev et al. *J. Chem. Phys.* **144**, 194507 (2016) - modified Z-method.
+* Cowley, *Phys. Rev.* **77**, 669 (1950) - Warren-Cowley SRO.
+* Compaan & Haven, *Trans. Faraday Soc.* **52**, 786 (1956) - BCC correlation
+  factor.
 
 ---
 
-## Configuration
+## Testing
 
-All tuneable parameters live in `config.py`. Key settings:
+```bash
+make test        # python -m pytest
+make lint        # byte-compile every module
+```
 
-| Parameter | Default | Description |
-| --- | --- | --- |
-| `TEST_MODE` | `False` | Switch to `True` for a 5-composition quick validation |
-| `N_COMPOSITIONS` | 100 | Number of alloy compositions to sample |
-| `LAMMPS_EXE` | (set this) | Path to LAMMPS binary |
-| `GRACE_MODEL_DIR` | (set this) | Path to GRACE-2L-OMAT weights |
-| `SLURM_PARTITION` | `compute` | Cluster partition name |
-| `T_FRAC_MAX` | 0.80 | Upper T bound as fraction of Tm (ADP safety margin) |
+The suite covers the sequential-fraction algebra, weighted Arrhenius fitting,
+graceful MSD log parsing, the mode switch, and composition sampling.
 
 ---
 
+## Requirements
+
+* Python >= 3.10
+* LAMMPS with the `adp` pair style (diffusion runs)
+* LAMMPS with the `grace` pair style (Tm runs)
+* Phonopy (vacancy formation entropy)
+* GRACE-2L-OMAT model weights
+* `WMoNbZrTiTa.nist.adp.txt` potential file (project root)
+* SLURM cluster environment
+
+Runtime dependencies are pinned in [`pyproject.toml`](pyproject.toml) and
+mirrored in [`requirements.txt`](requirements.txt).

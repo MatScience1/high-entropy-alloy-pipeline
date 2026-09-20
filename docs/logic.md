@@ -71,7 +71,7 @@ Sf = S_vac_supercell - ((N-1)/N) * S_perf_supercell
 
 ### C_0 — Vacancy Concentration Prefactor
 
-* **Caller:** `constants.py` (computed for use in Stage 7 `Cv.py`)
+* **Caller:** `constants.py` (computed for use in Stage 7 `vacancy_concentration.py`)
 * **Mechanics:** An analytical calculation derived directly from the linear mixture of the vacancy formation entropy computed earlier ($S_f = \sum x_i S_{f,i}$).
 * **Formula:** 
 
@@ -127,7 +127,7 @@ The exact algorithmic steps—such as building an elongated supercell, freezing 
 
 ## Stage 6 — Vacancy Diffusion Coefficient ($D_v$)
 
-* **Caller:** `Dv.py`
+* **Caller:** `vacancy_diffusion.py`
 * **Data Source:** Reads `msd_all.txt` and `msd_solo.txt` from Stage 5. Reads atom counts ($N_{total}$, $N_i$) from the MD logs.
 * **Mechanics:** Extracts the macroscopic diffusion slope. Because LAMMPS outputs the *average* atomic MSD, and the system contains exactly 1 vacancy, the vacancy's actual MSD is the total atomic MSD multiplied by the number of atoms $N$.
   1. Computes the linear slope of the MSD vs. time curve (discarding $t=0$).
@@ -143,7 +143,7 @@ The exact algorithmic steps—such as building an elongated supercell, freezing 
 
 ## Stage 7 — Equilibrium Vacancy Concentration (<i>C</i><sub>v</sub>)
 
-* **Caller:** `Cv.py`
+* **Caller:** `vacancy_concentration.py`
 * **Data Source:** Pulls <i>E</i><sub>f</sub> and <i>C</i><sub>0</sub> from `constants_all.csv` (computed analytically in Stage 2).
 * **Mechanics:** Purely analytical calculation. Evaluates the Arrhenius vacancy concentration equation across the simulation temperature grid.
   <br><br>
@@ -156,7 +156,7 @@ The exact algorithmic steps—such as building an elongated supercell, freezing 
 
 ## Stage 8 — Tracer Self-Diffusion (<i>D</i><sup>*</sup>)
 
-* **Caller:** `D2.py`
+* **Caller:** `tracer_diffusion.py`
 * **Data Source:** Merges the macroscopic vacancy diffusion (`Dv.txt` from Stage 6) with the theoretical vacancy concentration (`Cv.txt` from Stage 7).
 * **Mechanics:** Calculates the true, experimentally observable tracer diffusivity for each element. Because the original <i>D</i><sub>v</sub> was derived directly from the physical atomic displacement in MD, the BCC correlation factor (<i>f</i> &approx; 0.727) is natively embedded in the data.
   1. Computes per-element tracer diffusivity by dividing by the species mole fraction (<i>x</i><sub>i</sub>):

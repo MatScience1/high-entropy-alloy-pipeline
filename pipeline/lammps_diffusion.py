@@ -1,114 +1,114 @@
-"""
-pipeline/lammps_diffusion.py
-============================
-Stage 3 — Generate LAMMPS inputs for ADP-potential diffusion runs.
+"""Stage 3 - generate LAMMPS inputs for the ADP-potential diffusion runs.
 
-One directory is created per (composition, temperature):
+One directory is created per (composition, temperature)::
+
     runs/<comp_id>/sim_<T>/
-        bcc_vac_adv.in   — LAMMPS script (MC equilibration + MD diffusion)
-        submit.sh        — SLURM single-job script
-        dump/            — directory for LAMMPS dump files
+        bcc_vac_adv.in   LAMMPS script (MC equilibration + MD diffusion)
+        submit.sh        SLURM single-job script
+        dump/            directory for LAMMPS dump files
 
-Potential used: WMoNbZrTiTa.nist.adp.txt  (ADP — fast, used for diffusion)
-GRACE is used only for Tm determination (see lammps_tm.py).
+The ADP potential (``WMoNbZrTiTa.nist.adp.txt``) is used for the diffusion
+runs; GRACE is used only for the melting-temperature determination
+(see :mod:`pipeline.lammps_tm`).
 
-Physics of the simulation script
----------------------------------
-1. Build BCC supercell (CELL_SIZE³ × 2 atoms).
-2. Assign composition via sequential-fraction formula (see constants.py).
+Physics of the generated script
+-------------------------------
+1. Build a BCC supercell (``CELL_SIZE``^3 x 2 atoms).
+2. Assign the composition via the sequential-fraction formula
+   (see :func:`pipeline.lammps_common.sequential_fracs`).
 3. Minimise (HFTN) to relax overlaps.
-4. MC equilibration: N_MC steps of atom/swap moves (all 15 element pairs)
-   via fix atom/swap under NPT.  Develops short-range chemical order.
-5. MD diffusion: N_MD steps under NPT with one vacancy (atom 110 deleted).
-   MSD tracked per element → D* via Einstein relation.
-6. SRO: Warren-Cowley parameters αᵢⱼ = 1 − Pᵢⱼ/xⱼ tracked during MD.
-   Cutoff r_sro = BCC 1NN/2NN midpoint (composition-dependent).
+4. MC equilibration: ``N_MC`` steps of atom/swap moves over all 15 element
+   pairs via ``fix atom/swap`` under NPT, developing short-range order.
+5. MD diffusion: ``N_MD`` steps under NPT with a single vacancy.  The MSD is
+   tracked per element, giving D* through the Einstein relation.
+6. SRO: Warren-Cowley parameters ``alpha_ij = 1 - P_ij / x_j`` are tracked
+   during the MD run with the composition-dependent cutoff ``r_sro``.
 
 Output
 ------
-results/job_list.csv with columns: comp_id, T, path
+``results/job_list.csv`` with columns ``comp_id, T, path``.
 """
 
 from __future__ import annotations
 
 import itertools
 import json
+import shutil
 from pathlib import Path
 
 import pandas as pd
 
+import config
 from config import (
-    CELL_SIZE, ELEMENTS, LAMMPS_CMD_TMPL, MASSES, N_MC, N_MD,
-    POTENTIAL_FILE, RESULTS_DIR, RUNS_DIR,
-    SLURM_NODES, SLURM_PARTITION, SLURM_TASKS_PER_NODE, SLURM_WALLTIME,
+    CELL_SIZE,
+    ELEM_TYPE,
+    ELEMENTS,
+    LAMMPS_CMD_TMPL,
+    POTENTIAL_FILE,
+    RESULTS_DIR,
+    RUNS_DIR,
+    SLURM_NODES,
+    SLURM_PARTITION,
+    SLURM_TASKS_PER_NODE,
+    SLURM_WALLTIME,
     compute_r_sro,
 )
-from pipeline.constants import sequential_fracs
+from logging_config import get_logger
+from pipeline.lammps_common import mass_block, set_fraction_block
 
-# 1-based LAMMPS type index for each element (must match potential file order)
-ELEM_TYPE   = {e: i + 1 for i, e in enumerate(ELEMENTS)}
+logger = get_logger(__name__)
 
-# All 15 unique pairs from 6 elements (for atom/swap MC fixes)
-_SWAP_PAIRS = list(itertools.combinations(ELEMENTS, 2))
+# All 15 unique element pairs, used for the atom/swap MC fixes.
+_SWAP_PAIRS: list[tuple[str, str]] = list(itertools.combinations(ELEMENTS, 2))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  LAMMPS script block builders
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _mass_block() -> str:
-    return "\n".join(
-        f"mass  {ELEM_TYPE[e]}  {MASSES[e]}   # {e}" for e in ELEMENTS
-    )
-
-
-def _set_block(comp: dict[str, float]) -> str:
-    """sequential-fraction type assignment (corrected formula)."""
-    fracs  = sequential_fracs(comp)
-    order  = ["Mo", "Nb", "Zr", "Ti", "Ta"]
-    seeds  = {"Mo": 2639, "Nb": 16392, "Zr": 7739, "Ti": 2039, "Ta": 56530}
-    lines  = []
-    for e in order:
-        f = fracs.get(e, 0.0)
-        if f > 1e-9:
-            lines.append(
-                f"set group all type/fraction {ELEM_TYPE[e]} "
-                f"{f:.8f} {seeds[e]}   # {e}: target {comp.get(e,0):.4f}"
-            )
-    return "\n".join(lines) if lines else "# (pure W)"
-
-
 def _group_block() -> str:
-    """Dynamic per-element groups, updated every 100 steps."""
-    lines = []
-    for e in ELEMENTS:
+    """Return dynamic per-element groups, refreshed every 100 steps."""
+    lines: list[str] = []
+    for element in ELEMENTS:
         lines.append(
-            f"variable  is{e}  atom  \"type=={ELEM_TYPE[e]}\"\n"
-            f"group     {e}_type  dynamic all var is{e}  every 100"
+            f"variable  is{element}  atom  \"type=={ELEM_TYPE[element]}\"\n"
+            f"group     {element}_type  dynamic all var is{element}  every 100"
         )
     return "\n".join(lines)
 
 
 def _comp_variable_block() -> str:
-    """Instantaneous concentration variables from dynamic group counts."""
-    lines = ["variable  tot_numb  equal  count(all)"]
-    for e in ELEMENTS:
-        lines.append(f"variable  {e}_numb  equal  count({e}_type)")
-        lines.append(f"variable  {e}_comp  equal  v_{e}_numb/v_tot_numb")
+    """Return instantaneous concentration variables from dynamic group counts."""
+    lines: list[str] = ["variable  tot_numb  equal  count(all)"]
+    for element in ELEMENTS:
+        lines.append(f"variable  {element}_numb  equal  count({element}_type)")
+        lines.append(
+            f"variable  {element}_comp  equal  v_{element}_numb/v_tot_numb"
+        )
     return "\n".join(lines)
 
 
 def _sro_block(r_sro: float) -> str:
-    """
-    Coordination and Warren-Cowley SRO block.
+    """Return the coordination and Warren-Cowley SRO block.
 
     For each ordered pair (A, B):
-      coord_AB  = mean number of B atoms within r_sro of each A atom
-      z_A       = total coordination of A (sum over all B)
-      alpha_AB  = 1 − (coord_AB / z_A) / x_B
-                = Warren-Cowley SRO parameter (Cowley 1950)
-                  0: random,  positive: unlike-pair depletion,
-                  negative: unlike-pair enrichment
+
+    * ``coord_AB`` = mean number of B atoms within ``r_sro`` of each A atom,
+    * ``z_A`` = total coordination of A (sum over all B),
+    * ``alpha_AB = 1 - (coord_AB / z_A) / x_B`` (Warren-Cowley, Cowley 1950).
+
+    ``alpha = 0`` indicates random mixing, ``alpha > 0`` unlike-pair depletion,
+    and ``alpha < 0`` unlike-pair enrichment.
+
+    Parameters
+    ----------
+    r_sro : float
+        SRO cutoff radius [Angstrom].
+
+    Returns
+    -------
+    str
+        LAMMPS ``compute``/``variable`` block.
     """
     coord = "\n".join(
         f"compute  c{a}{b}  {a}_type  coord/atom  "
@@ -122,7 +122,7 @@ def _sro_block(r_sro: float) -> str:
     z = "\n".join(
         f"variable  z{a}  equal  "
         + "+".join(f"c_avg{a}{b}" for b in ELEMENTS)
-        + "+0.00001"          # avoid div-by-zero for dilute elements
+        + "+0.00001"          # avoid division by zero for dilute elements
         for a in ELEMENTS
     )
     alpha = "\n".join(
@@ -134,7 +134,7 @@ def _sro_block(r_sro: float) -> str:
 
 
 def _av_columns() -> str:
-    """Column list for fix ave/time SRO output."""
+    """Return the column list for the ``fix ave/time`` SRO output."""
     cols = ["c_T_c"]
     cols += [f"v_{e}_comp" for e in ELEMENTS]
     cols += [f"v_alpha{a}{b}" for a in ELEMENTS for b in ELEMENTS]
@@ -142,8 +142,8 @@ def _av_columns() -> str:
 
 
 def _mc_block() -> str:
-    """15 atom/swap fixes (one per element pair)."""
-    lines = []
+    """Return the 15 ``fix atom/swap`` commands, one per element pair."""
+    lines: list[str] = []
     for idx, (e1, e2) in enumerate(_SWAP_PAIRS):
         seed = 1709 + idx * 1031
         lines.append(
@@ -154,19 +154,21 @@ def _mc_block() -> str:
 
 
 def _unfix_mc() -> str:
+    """Return the ``unfix`` commands for all atom/swap fixes."""
     return "\n".join(f"unfix mc_{e1}{e2}" for e1, e2 in _SWAP_PAIRS)
 
 
 def _msd_block() -> str:
-    """MSD computes: all atoms + per-element."""
+    """Return the MSD computes for all atoms and for each element."""
     lines = ["compute  msd_all  all  msd"]
-    for e in ELEMENTS:
-        lines.append(f"compute  msd_{e.lower()}  {e}_dif  msd")
+    for element in ELEMENTS:
+        lines.append(f"compute  msd_{element.lower()}  {element}_dif  msd")
     return "\n".join(lines)
 
 
 def _msd_thermo() -> str:
-    cols  = "step temp pe ke etotal pxx pyy pzz press vol lx ly lz"
+    """Return the thermo column list for the MD production run."""
+    cols = "step temp pe ke etotal pxx pyy pzz press vol lx ly lz"
     cols += "".join(f" v_{e}_comp" for e in ELEMENTS)
     cols += " c_msd_all[1] c_msd_all[4]"
     cols += "".join(
@@ -180,26 +182,35 @@ def _msd_thermo() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_diffusion_input(comp: dict[str, float], T: float, a0: float) -> str:
-    """
-    Return a complete bcc_vac_adv.in LAMMPS script.
+    """Return a complete ``bcc_vac_adv.in`` LAMMPS script.
 
     Parameters
     ----------
-    comp : element → mole fraction
-    T    : simulation temperature [K]
-    a0   : Vegard's law lattice parameter [Å]
-    """
-    T      = int(round(T))
-    T_init = 2 * T                              # initial velocity temperature
-    r_sro  = round(compute_r_sro(a0), 4)       # composition-specific SRO cutoff
-    lx = ly = lz = CELL_SIZE
+    comp : dict of str to float
+        Mole fractions keyed by element symbol.
+    T : float
+        Simulation temperature [K].
+    a0 : float
+        Lattice parameter [Angstrom].
 
-    header = ", ".join(f"{e}:{comp.get(e,0):.3f}" for e in ELEMENTS)
+    Returns
+    -------
+    str
+        Complete LAMMPS input script.
+    """
+    temperature = int(round(T))
+    t_init = 2 * temperature                    # initial velocity temperature
+    r_sro = round(compute_r_sro(a0), 4)         # composition-specific cutoff
+    lx = ly = lz = CELL_SIZE
+    n_mc = int(config.N_MC)
+    n_md = int(config.N_MD)
+
+    header = ", ".join(f"{e}:{comp.get(e, 0):.3f}" for e in ELEMENTS)
 
     return f"""# ─────────────────────────────────────────────────────────────────────────
 # bcc_vac_adv.in  —  WMoNbZrTiTa ADP diffusion run
 # Composition : {header}
-# Temperature : {T} K
+# Temperature : {temperature} K
 # Potential   : ADP (WMoNbZrTiTa.nist.adp.txt)
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -210,29 +221,29 @@ neighbor     0.5 bin
 neigh_modify every 2 delay 10 check yes
 
 # ── simulation parameters ─────────────────────────────────────────────────
-variable  T     equal  {T}
-variable  r_sro equal  {r_sro}    # BCC 1NN/2NN midpoint for a0={a0:.4f} Å
+variable  T     equal  {temperature}
+variable  r_sro equal  {r_sro}    # BCC 1NN/2NN midpoint for a0={a0:.4f} A
 variable  lx    equal  {lx}
 variable  ly    equal  {ly}
 variable  lz    equal  {lz}
-variable  N_mc  equal  {N_MC}
-variable  N_md  equal  {N_MD}
-variable  T_in  equal  {T_init}   # initial velocity temperature (2×T)
+variable  N_mc  equal  {n_mc}
+variable  N_md  equal  {n_md}
+variable  T_in  equal  {t_init}   # initial velocity temperature (2xT)
 
-# ── BCC supercell ({lx}×{ly}×{lz} unit cells = {lx*ly*lz*2} atoms before vacancy) ──────
+# ── BCC supercell ({lx}x{ly}x{lz} unit cells = {lx*ly*lz*2} atoms before vacancy) ──
 lattice       bcc {a0:.5f}
 region        box block 0.0 ${{lx}} 0.0 ${{ly}} 0.0 ${{lz}}
 create_box    6 box
 create_atoms  1 box    # all atoms start as W (type 1)
 
-{_mass_block()}
+{mass_block()}
 
-# ── alloy creation (sequential-fraction formula — see pipeline/constants.py) ─
-{_set_block(comp)}
+# ── alloy creation (sequential-fraction formula — see pipeline/lammps_common.py) ─
+{set_fraction_block(comp)}
 
 velocity all create ${{T_in}} 130784
 
-timestep 0.0005    # 0.5 fs  (ADP is stiff near vacancy)
+timestep 0.0005    # 0.5 fs  (ADP is stiff near a vacancy)
 
 pair_style  adp
 pair_coeff  * * {POTENTIAL_FILE.name} W Mo Nb Zr Ti Ta
@@ -278,7 +289,7 @@ fix main body npt temp ${{T}} ${{T}} 5.0 \\
 
 {_mc_block()}
 
-run ${{N_mc}}    # MC equilibration: {N_MC:,} steps
+run ${{N_mc}}    # MC equilibration: {n_mc:,} steps
 
 unfix main
 {_unfix_mc()}
@@ -294,7 +305,7 @@ dump_modify snap element {" ".join(ELEMENTS)}
 fix main_1 body npt temp ${{T}} ${{T}} 5.0 \\
                x 0.0 0.0 5.0  y 0.0 0.0 5.0  z 0.0 0.0 5.0
 
-# Create one vacancy (atom 110 is near the cell centre for a {lx}³ BCC cell)
+# Create one vacancy (atom 110 is near the cell centre for a {lx}^3 BCC cell)
 group del id 110
 delete_atoms group del
 
@@ -305,7 +316,7 @@ delete_atoms group del
 
 thermo_style custom {_msd_thermo()}
 
-run ${{N_md}}    # MD production: {N_MD:,} steps
+run ${{N_md}}    # MD production: {n_md:,} steps
 """
 
 
@@ -314,6 +325,20 @@ run ${{N_md}}    # MD production: {N_MD:,} steps
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _submit_script(comp_id: str, T: int) -> str:
+    """Return the SLURM submission script for one diffusion run.
+
+    Parameters
+    ----------
+    comp_id : str
+        Composition identifier.
+    T : int
+        Simulation temperature [K].
+
+    Returns
+    -------
+    str
+        SLURM batch script.
+    """
     ntasks = SLURM_NODES * SLURM_TASKS_PER_NODE
     return f"""#!/bin/bash
 #SBATCH --job-name={comp_id}_T{T}
@@ -344,44 +369,59 @@ echo "Finished $(date)"
 #  Directory builder
 # ══════════════════════════════════════════════════════════════════════════════
 
-def create_run_directories(compositions_df: pd.DataFrame,
-                            constants_df:   pd.DataFrame) -> list[dict]:
+def create_run_directories(
+    compositions_df: pd.DataFrame,
+    constants_df: pd.DataFrame,
+) -> list[dict[str, object]]:
+    """Create ``runs/<comp_id>/sim_<T>/`` with inputs and submit scripts.
+
+    Parameters
+    ----------
+    compositions_df : pandas.DataFrame
+        Output of :func:`pipeline.compositions.generate_compositions`.
+    constants_df : pandas.DataFrame
+        Output of :func:`pipeline.constants.compute_all_constants`.
+
+    Returns
+    -------
+    list of dict
+        Records with keys ``comp_id``, ``T``, and ``path``.  Also written to
+        ``results/job_list.csv``.
     """
-    Create runs/<comp_id>/sim_<T>/ with bcc_vac_adv.in and submit.sh.
-    Returns list of {comp_id, T, path} records.
-    """
-    job_list = []
+    job_list: list[dict[str, object]] = []
 
     for _, crow in compositions_df.iterrows():
-        comp_id = crow["comp_id"]
-        comp    = {e: float(crow[f"x_{e}"]) for e in ELEMENTS}
+        comp_id = str(crow["comp_id"])
+        comp = {e: float(crow[f"x_{e}"]) for e in ELEMENTS}
 
-        const   = constants_df[constants_df["comp_id"] == comp_id].iloc[0]
-        a0      = float(const["a0_vegard"])
-        t_grid  = json.loads(const["T_grid"]) if isinstance(const["T_grid"], str) \
-                  else const["T_grid"]
+        const = constants_df[constants_df["comp_id"] == comp_id].iloc[0]
+        a0 = float(const["a0_vegard"])
+        t_grid = (
+            json.loads(const["T_grid"])
+            if isinstance(const["T_grid"], str)
+            else const["T_grid"]
+        )
 
         for T in t_grid:
             sim_dir = RUNS_DIR / comp_id / f"sim_{T}"
             sim_dir.mkdir(parents=True, exist_ok=True)
             (sim_dir / "dump").mkdir(exist_ok=True)
 
-            # Symlink (or copy) the potential file so LAMMPS finds it locally
+            # Symlink (or copy) the potential file so LAMMPS finds it locally.
             pot_link = sim_dir / POTENTIAL_FILE.name
             if not pot_link.exists():
                 try:
                     pot_link.symlink_to(POTENTIAL_FILE)
                 except OSError:
-                    import shutil
                     shutil.copy(POTENTIAL_FILE, pot_link)
 
             (sim_dir / "bcc_vac_adv.in").write_text(
                 build_diffusion_input(comp, T, a0)
             )
-            (sim_dir / "submit.sh").write_text(_submit_script(comp_id, T))
+            (sim_dir / "submit.sh").write_text(_submit_script(comp_id, int(T)))
 
             job_list.append({"comp_id": comp_id, "T": T, "path": str(sim_dir)})
 
     pd.DataFrame(job_list).to_csv(RESULTS_DIR / "job_list.csv", index=False)
-    print(f"[diffusion inputs] {len(job_list)} directories created")
+    logger.info("Created %d diffusion run directories", len(job_list))
     return job_list

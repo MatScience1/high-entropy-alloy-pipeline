@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "high-entropy-alloy-pipeline"
+version = "1.1.0"
+description = "High-throughput MD pipeline for vacancy-mediated tracer diffusion, short-range order, and melting temperatures in W-Mo-Nb-Zr-Ti-Ta refractory high-entropy alloys."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "WMoNbZrTiTa pipeline contributors" }]
+keywords = [
+  "high-entropy alloy",
+  "molecular dynamics",
+  "LAMMPS",
+  "diffusion",
+  "short-range order",
+  "refractory metals",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+
+# Strictly pinned runtime dependencies.  These are the versions the pipeline
+# is validated against; requirements.txt mirrors this list for locked installs.
+dependencies = [
+  "numpy==1.26.4",
+  "pandas==3.0.3",
+  "matplotlib==3.6.3",
+  "scipy==1.11.4",
+  "scikit-learn==1.9.1",
+]
+
+[project.optional-dependencies]
+# phonopy is required only by pipeline/compute_sf_phonopy.py (Stage 2 pre-step).
+phonopy = ["phonopy==2.20.0"]
+dev = ["pytest==8.3.4"]
+
+[project.scripts]
+hea-pipeline = "run_pipeline:main"
+
+[tool.setuptools]
+py-modules = ["config", "run_pipeline", "logging_config", "reporting"]
+packages = ["pipeline", "analysis"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

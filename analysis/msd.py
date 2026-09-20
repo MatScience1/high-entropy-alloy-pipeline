@@ -1,54 +1,65 @@
-"""
-analysis/msd.py
-===============
-Stage 5 — Parse mean-square displacement from LAMMPS thermo output.
+"""Stage 5 - parse mean-square displacement from LAMMPS thermo output.
 
-Interface (called by run_pipeline.py)
---------------------------------------
-    run_all(sim_base: Path, res_base: Path) -> None
+Interface (called by ``run_pipeline.py``)
+-----------------------------------------
+``run_all(sim_base, res_base)``
 
-    sim_base : runs/<comp_id>/              (contains sim_<T>/ subdirectories)
-    res_base : results/<comp_id>/sim_x/     (output destination)
+* ``sim_base``: ``runs/<comp_id>/`` (contains ``sim_<T>/`` subdirectories)
+* ``res_base``: ``results/<comp_id>/sim_x/`` (output destination)
 
 Output files written per temperature
--------------------------------------
-    results/<comp_id>/sim_x/<T>/msd_all.txt       MSD of all atoms vs time
-    results/<comp_id>/sim_x/<T>/msd_<elem>.txt    MSD per element
+------------------------------------
+``results/<comp_id>/sim_x/<T>/msd_all.txt``
+    MSD of all atoms versus time.
+``results/<comp_id>/sim_x/<T>/msd_solo.txt``
+    MSD per element.
 
 Physics
 -------
-The LAMMPS compute msd produces:
-    MSD(t) = <|r(t) - r(0)|²>   [Å²]
+The LAMMPS ``compute msd`` produces
 
-where r(t) is the unwrapped position at time t.
-D* is extracted in analysis/D2.py via the Einstein relation:
-    D* = lim_{t→∞}  MSD(t) / (6t)     [Å² ps⁻¹ → m² s⁻¹]
+.. math::
+
+    \\mathrm{MSD}(t) = \\langle |\\mathbf{r}(t) - \\mathbf{r}(0)|^2 \\rangle
+    \\quad [\\text{\\AA}^2],
+
+where :math:`\\mathbf{r}(t)` is the unwrapped position at time :math:`t`.
+The tracer diffusivity is extracted in
+:mod:`analysis.tracer_diffusion` via the Einstein relation
+
+.. math::
+
+    D^* = \\lim_{t \\to \\infty} \\frac{\\mathrm{MSD}(t)}{6t}.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import re
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import AutoMinorLocator
-from scipy.stats import linregress
 
-# Default element set and display properties
-ELEMENTS_ALL = ["w", "mo", "nb", "zr", "ti", "ta"]
-ELEMENT_LABELS = {"w": "W", "mo": "Mo", "nb": "Nb",
-                  "zr": "Zr", "ti": "Ti", "ta": "Ta"}
-COLORS = {
-    "w":  "#e05c5c", "mo": "#5c8fe0", "nb": "#5cc47a",
+from analysis.logparse import LogParseError, read_lines
+from config import TIMESTEP_PS
+from logging_config import configure_logging, get_logger
+
+logger = get_logger(__name__)
+
+# Default element set and display properties.
+ELEMENTS_ALL: list[str] = ["w", "mo", "nb", "zr", "ti", "ta"]
+ELEMENT_LABELS: dict[str, str] = {
+    "w": "W", "mo": "Mo", "nb": "Nb", "zr": "Zr", "ti": "Ti", "ta": "Ta",
+}
+COLORS: dict[str, str] = {
+    "w": "#e05c5c", "mo": "#5c8fe0", "nb": "#5cc47a",
     "zr": "#e0a040", "ti": "#9b5ce0", "ta": "#ff0084",
 }
-
-TIMESTEP_PS = 0.0005  # ps per step
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -56,69 +67,108 @@ TIMESTEP_PS = 0.0005  # ps per step
 # ══════════════════════════════════════════════════════════════════════════════
 
 def parse_log(log_path: Path) -> dict[str, np.ndarray]:
-    """
-    Find the MD section containing c_msd_all[4] and parse numeric rows.
-    Returns dict {column_name: np.array}.
-    """
-    with open(log_path, "r") as fh:
-        lines = fh.readlines()
+    """Parse the MD section containing ``c_msd_all[4]`` from a LAMMPS log.
 
-    # Find the LAST header line that contains c_msd_all[4]
-    # (there may be multiple runs in one log)
-    header_idx = None
+    The parser locates the last thermo header that contains both
+    ``c_msd_all[1]`` and ``c_msd_all[4]`` (a log may contain several runs) and
+    reads the numeric rows that follow.  Malformed or truncated rows are
+    skipped with a warning; parsing stops at the first non-numeric line
+    (typically ``Loop time``).
+
+    Parameters
+    ----------
+    log_path : pathlib.Path
+        Path to ``log.lammps``.
+
+    Returns
+    -------
+    dict of str to numpy.ndarray
+        Column name to data array.
+
+    Raises
+    ------
+    LogParseError
+        If the file is missing, has no MSD header, or contains no data rows.
+    """
+    lines = read_lines(log_path)
+
+    header_idx: int | None = None
     for i, line in enumerate(lines):
         if "c_msd_all[1]" in line and "c_msd_all[4]" in line:
             header_idx = i
-
     if header_idx is None:
-        raise ValueError(f"No MSD header found in {log_path}")
+        raise LogParseError(f"no MSD header found in {log_path}")
 
     headers = lines[header_idx].split()
     data: dict[str, list[float]] = {h: [] for h in headers}
+    n_skipped = 0
 
     for line in lines[header_idx + 1:]:
         stripped = line.strip()
         if not stripped:
             continue
         tokens = stripped.split()
-        # Stop at any non-numeric first token
         try:
             int(tokens[0])
         except (ValueError, IndexError):
-            break
+            break   # end of the thermo block (e.g. "Loop time")
         if len(tokens) != len(headers):
-            break
-        for h, v in zip(headers, tokens):
-            data[h].append(float(v))
+            n_skipped += 1
+            continue
+        try:
+            values = [float(v) for v in tokens]
+        except ValueError:
+            n_skipped += 1
+            continue
+        for name, value in zip(headers, values):
+            data[name].append(value)
+
+    if n_skipped:
+        logger.warning(
+            "Skipped %d malformed row(s) in %s (truncated log?)",
+            n_skipped, log_path,
+        )
 
     if not data.get("Step"):
-        raise ValueError(f"No data rows after MSD header in {log_path}")
+        raise LogParseError(f"no data rows after MSD header in {log_path}")
 
     return {k: np.array(v) for k, v in data.items()}
 
 
 def active_elements_in_log(data: dict[str, np.ndarray]) -> list[str]:
-    """Return lowercase element names whose MSD column is present in data."""
-    return [
-        el for el in ELEMENTS_ALL
-        if f"c_msd_{el}[4]" in data
-    ]
+    """Return the lowercase elements whose MSD column is present in ``data``.
+
+    Parameters
+    ----------
+    data : dict of str to numpy.ndarray
+        Parsed log columns.
+
+    Returns
+    -------
+    list of str
+        Lowercase element symbols with a ``c_msd_<el>[4]`` column.
+    """
+    return [el for el in ELEMENTS_ALL if f"c_msd_{el}[4]" in data]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Output writers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def write_msd_all(out_path: Path, time: np.ndarray,
-                  msd: np.ndarray) -> None:
-    header = "time_ps  c_msd_all[4]"
-    np.savetxt(out_path, np.column_stack([time, msd]),
-               header=header, fmt="%.8e", comments="")
+def write_msd_all(out_path: Path, time: np.ndarray, msd: np.ndarray) -> None:
+    """Write the all-atoms MSD to a two-column text file."""
+    np.savetxt(
+        out_path, np.column_stack([time, msd]),
+        header="time_ps  c_msd_all[4]", fmt="%.8e", comments="",
+    )
 
 
-def write_msd_solo(out_path: Path, time: np.ndarray,
-                   msds: dict[str, np.ndarray]) -> None:
-    """Write per-element MSD file; include only elements present in msds."""
+def write_msd_solo(
+    out_path: Path,
+    time: np.ndarray,
+    msds: dict[str, np.ndarray],
+) -> None:
+    """Write the per-element MSD file, including only elements present."""
     elements = list(msds.keys())
     col_names = [f"c_msd_{el}[4]" for el in elements]
     header = "time_ps  " + "  ".join(col_names)
@@ -130,23 +180,27 @@ def write_msd_solo(out_path: Path, time: np.ndarray,
 #  Plotting helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _linear_fit(x: np.ndarray, y: np.ndarray
-                ) -> tuple[float, float, np.ndarray]:
-    """Return (slope, intercept, y_fitted)."""
+def _linear_fit(x: np.ndarray, y: np.ndarray) -> tuple[float, float, np.ndarray]:
+    """Return ``(slope, intercept, y_fitted)`` for a first-order polynomial."""
     coeffs = np.polyfit(x, y, 1)
-    return coeffs[0], coeffs[1], np.polyval(coeffs, x)
+    return float(coeffs[0]), float(coeffs[1]), np.polyval(coeffs, x)
 
 
-def plot_msd_all(time: np.ndarray, msd: np.ndarray,
-                 temperature: str, out_path: Path) -> None:
+def plot_msd_all(
+    time: np.ndarray,
+    msd: np.ndarray,
+    temperature: str,
+    out_path: Path,
+) -> None:
+    """Plot the all-atoms MSD with a linear fit overlay."""
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.plot(time, msd, color="#aaaaaa", lw=0.8, alpha=0.5, label="raw")
     slope, _, y_fit = _linear_fit(time, msd)
     ax.plot(time, y_fit, color="#e05c5c", lw=1.5, ls="--",
-            label=f"fit  slope={slope:.3e} Å²/ps")
+            label=f"fit  slope={slope:.3e} A^2/ps")
     ax.set_xlabel("Time (ps)")
     ax.set_ylabel(r"MSD ($\AA^2$)")
-    ax.set_title(f"T = {temperature} K — all atoms")
+    ax.set_title(f"T = {temperature} K - all atoms")
     ax.legend(fontsize=8)
     ax.xaxis.set_minor_locator(AutoMinorLocator())
     ax.yaxis.set_minor_locator(AutoMinorLocator())
@@ -155,18 +209,23 @@ def plot_msd_all(time: np.ndarray, msd: np.ndarray,
     plt.close(fig)
 
 
-def plot_msd_solo(time: np.ndarray, msds: dict[str, np.ndarray],
-                  temperature: str, out_path: Path) -> None:
+def plot_msd_solo(
+    time: np.ndarray,
+    msds: dict[str, np.ndarray],
+    temperature: str,
+    out_path: Path,
+) -> None:
+    """Plot the per-element MSD with linear fit overlays."""
     fig, ax = plt.subplots(figsize=(6, 4))
-    for el, msd in msds.items():
-        color = COLORS.get(el, "black")
+    for element, msd in msds.items():
+        color = COLORS.get(element, "black")
         slope, _, y_fit = _linear_fit(time, msd)
         ax.plot(time, msd, color=color, lw=0.8, alpha=0.4)
         ax.plot(time, y_fit, color=color, lw=1.5, ls="--",
-                label=f"{ELEMENT_LABELS.get(el, el)}  {slope:.3e} Å²/ps")
+                label=f"{ELEMENT_LABELS.get(element, element)}  {slope:.3e} A^2/ps")
     ax.set_xlabel("Time (ps)")
     ax.set_ylabel(r"MSD ($\AA^2$)")
-    ax.set_title(f"T = {temperature} K — per element")
+    ax.set_title(f"T = {temperature} K - per element")
     ax.legend(fontsize=7, ncol=2)
     ax.xaxis.set_minor_locator(AutoMinorLocator())
     ax.yaxis.set_minor_locator(AutoMinorLocator())
@@ -180,30 +239,39 @@ def plot_msd_solo(time: np.ndarray, msds: dict[str, np.ndarray],
 # ══════════════════════════════════════════════════════════════════════════════
 
 def process_dir(sim_dir: Path, res_dir: Path) -> bool:
-    """
-    Parse sim_dir/log.lammps; write MSD txt files and plots to res_dir.
-    Returns True on success, False on skip/error.
+    """Parse ``sim_dir/log.lammps`` and write MSD files and plots to ``res_dir``.
+
+    Parameters
+    ----------
+    sim_dir : pathlib.Path
+        Directory containing ``log.lammps``.
+    res_dir : pathlib.Path
+        Output directory for the MSD text files and plots.
+
+    Returns
+    -------
+    bool
+        ``True`` on success, ``False`` if the run was skipped or failed.
     """
     log_path = sim_dir / "log.lammps"
     if not log_path.exists():
-        print(f"  [skip] no log.lammps in {sim_dir}")
+        logger.warning("no log.lammps in %s - skipped", sim_dir)
         return False
 
     temperature = sim_dir.name.split("_")[1]
-    print(f"  [msd] T={temperature} K ...")
+    logger.info("T=%s K ...", temperature)
 
     try:
         data = parse_log(log_path)
-    except Exception as exc:
-        print(f"  [WARN] parse failed: {exc}")
+    except LogParseError as exc:
+        logger.warning("parse failed: %s", exc)
         return False
 
     steps = data["Step"]
     time = (steps - steps[0]) * TIMESTEP_PS   # shift so t=0 at run start
 
-    # --- all-atoms MSD --------------------------------------------------------
     if "c_msd_all[4]" not in data:
-        print(f"  [WARN] c_msd_all[4] not found in {log_path}")
+        logger.warning("c_msd_all[4] not found in %s", log_path)
         return False
 
     msd_all = data["c_msd_all[4]"]
@@ -211,14 +279,13 @@ def process_dir(sim_dir: Path, res_dir: Path) -> bool:
     write_msd_all(res_dir / "msd_all.txt", time, msd_all)
     plot_msd_all(time, msd_all, temperature, res_dir / "msd_all.png")
 
-    # --- per-element MSD ------------------------------------------------------
     active = active_elements_in_log(data)
     if active:
         msds = {el: data[f"c_msd_{el}[4]"] for el in active}
         write_msd_solo(res_dir / "msd_solo.txt", time, msds)
         plot_msd_solo(time, msds, temperature, res_dir / "msd_solo.png")
     else:
-        print(f"  [WARN] no per-element MSD columns found")
+        logger.warning("no per-element MSD columns found in %s", log_path)
 
     return True
 
@@ -228,41 +295,52 @@ def process_dir(sim_dir: Path, res_dir: Path) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_all(sim_base: Path, res_base: Path) -> None:
+    """Process every ``sim_*`` subdirectory under ``sim_base``.
+
+    Parameters
+    ----------
+    sim_base : pathlib.Path
+        Directory containing ``sim_<T>`` subdirectories.
+    res_base : pathlib.Path
+        Output directory; the ``sim_<T>`` structure is mirrored.
     """
-    Walk all sim_* subdirectories under sim_base.
-    Mirror structure into res_base for outputs.
-    """
+    if not sim_base.exists():
+        logger.warning("simulation base not found: %s", sim_base)
+        return
+
     sim_dirs = sorted(
         [d for d in sim_base.iterdir()
          if d.is_dir() and re.match(r"sim_\d+$", d.name)],
         key=lambda d: int(d.name.split("_")[1]),
     )
     if not sim_dirs:
-        print(f"[msd] No sim_* directories found under {sim_base}")
+        logger.warning("no sim_* directories found under %s", sim_base)
         return
 
-    print(f"[msd] Found {len(sim_dirs)} directories under {sim_base}")
-    ok, fail = 0, 0
-    for d in sim_dirs:
-        T = d.name.split("_")[1]
-        res_dir = res_base / f"sim_{T}"
-        if process_dir(d, res_dir):
+    logger.info("Found %d directories under %s", len(sim_dirs), sim_base)
+    ok = 0
+    failed = 0
+    for sim_dir in sim_dirs:
+        temperature = sim_dir.name.split("_")[1]
+        res_dir = res_base / f"sim_{temperature}"
+        if process_dir(sim_dir, res_dir):
             ok += 1
         else:
-            fail += 1
-    print(f"[msd] Done: {ok} processed, {fail} skipped/failed")
+            failed += 1
+    logger.info("Done: %d processed, %d skipped/failed", ok, failed)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  CLI
-# ══════════════════════════════════════════════════════════════════════════════
-
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Parse LAMMPS MSD from log files")
-    ap.add_argument("--sim_base", default="../sim_x",
-                    help="Directory containing sim_T sub-directories")
-    ap.add_argument("--res_base", default="../results/sim_x",
-                    help="Output directory (mirrored structure)")
-    args = ap.parse_args()
+def main() -> None:
+    """Command-line entry point for MSD extraction."""
+    configure_logging()
+    parser = argparse.ArgumentParser(description="Parse LAMMPS MSD from log files.")
+    parser.add_argument("--sim_base", default="../sim_x",
+                        help="Directory containing sim_T sub-directories.")
+    parser.add_argument("--res_base", default="../results/sim_x",
+                        help="Output directory (mirrored structure).")
+    args = parser.parse_args()
     run_all(Path(args.sim_base), Path(args.res_base))
 
+
+if __name__ == "__main__":
+    main()

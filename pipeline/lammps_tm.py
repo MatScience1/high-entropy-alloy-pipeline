@@ -1,41 +1,42 @@
-"""
-pipeline/lammps_tm.py
-=====================
-Stages 3b & 3c — Melting temperature via phase coexistence (GRACE MLIP).
+"""Stages 3b and 3c - melting temperature via phase coexistence (GRACE MLIP).
 
-Why a separate module from lammps_diffusion.py
------------------------------------------------
-The ADP potential (diffusion runs) and GRACE MLIP (Tm runs) are used for
+Why a separate module from :mod:`pipeline.lammps_diffusion`
+-----------------------------------------------------------
+The ADP potential (diffusion runs) and the GRACE MLIP (Tm runs) serve
 different physical purposes:
-  - ADP  : fast structural dynamics, MSD convergence, SRO.  Tm is approximate.
-  - GRACE: high-fidelity energy surface.  Used ONLY for Tm determination.
 
-The real Tm from coexistence feeds back to constants_all.csv and sets the
-homologous temperature axis T/Tm for all D*(T/Tm) plots.
+* ADP: fast structural dynamics, MSD convergence, SRO.  Tm is approximate.
+* GRACE: high-fidelity energy surface, used only for the Tm determination.
+
+The real Tm from coexistence feeds back into ``constants_all.csv`` and sets
+the homologous temperature axis ``T / Tm`` for all D*(T/Tm) plots.
 
 Method: Modified Z-method (Karavaev et al. 2016)
--------------------------------------------------
-1.  Build elongated BCC supercell (NX × NY × NZ, z-axis is the long axis).
-2.  Assign alloy composition via sequential-fraction formula.
-3.  Minimise, then equilibrate the full crystal at T_solid = 0.5·Tm_rom.
-4.  Freeze the solid half (z ∈ [0, NZ/2]).
-    Heat the liquid half (z ∈ [NZ/2, NZ]) at 2·Tm_rom until it melts.
-5.  Release all atoms.  Run NPT at T_guess with INDEPENDENT x, y, z barostats.
-    (iso barostat violates Karavaev's stress equalization requirement.)
-6.  Stress equalization: tight per-axis NPT until Pxx ≈ Pyy ≈ Pzz ≈ 0.
-7.  Read volume and pressure from log:
-      ΔV > 0  →  melting   (T_guess > Tm) → try lower T_guess
-      ΔV < 0  →  freezing  (T_guess < Tm) → try higher T_guess
-      ΔV ≈ 0, |press| < 500 bar → coexistence → T_guess ≈ Tm
+------------------------------------------------
+1. Build an elongated BCC supercell (``NX x NY x NZ``, z is the long axis).
+2. Assign the alloy composition via the sequential-fraction formula.
+3. Minimise, then equilibrate the full crystal at ``T_solid = 0.5 * Tm_rom``.
+4. Freeze the solid half (``z in [0, NZ/2]``) and heat the liquid half
+   (``z in [NZ/2, NZ]``) at ``2 * Tm_rom`` until it melts.
+5. Release all atoms and run NPT at ``T_guess`` with independent x, y, z
+   barostats.  An isotropic barostat violates Karavaev's stress
+   equalization requirement.
+6. Stress equalization: tight per-axis NPT until ``Pxx ~ Pyy ~ Pzz ~ 0``.
+7. Read volume and pressure from the log:
 
-Five T_guess values bracket Tm_rom ± 20%.  After all runs finish,
-parse_coexistence_log() identifies the stable one and patch_constants()
-writes real_Tm + rebuilt T_grid back to constants_all.csv.
+   * ``dV > 0`` -> melting (``T_guess > Tm``) -> try a lower ``T_guess``
+   * ``dV < 0`` -> freezing (``T_guess < Tm``) -> try a higher ``T_guess``
+   * ``dV ~ 0`` and ``|P| < 500`` bar -> coexistence -> ``T_guess ~ Tm``
+
+``COEX_N_TGUESS`` values bracket ``Tm_rom`` by +/-20%.  After all runs finish,
+:func:`parse_coexistence_log` identifies the stable one and
+:func:`patch_constants_with_tm` writes the real Tm and rebuilt T_grid back to
+``constants_all.csv``.
 
 References
 ----------
-  Karavaev et al., J. Chem. Phys. 144, 194507 (2016) — modified Z-method
-  Zhu et al., npj Comput. Mater. 10, 60 (2024)       — MLIP for Tm
+Karavaev et al., J. Chem. Phys. 144, 194507 (2016) - modified Z-method.
+Zhu et al., npj Comput. Mater. 10, 60 (2024) - MLIP for Tm.
 """
 
 from __future__ import annotations
@@ -46,64 +47,64 @@ from pathlib import Path
 
 import pandas as pd
 
+import config
 from config import (
-    COEX_N_EQUIL, COEX_N_MELT, COEX_N_COEX, COEX_N_STRESS_EQ,
-    COEX_N_TGUESS, COEX_NX, COEX_NY, COEX_NZ,
-    COEX_TAU_P, COEX_TAU_P_EQ, COEX_TAU_T,
-    ELEMENTS, GRACE_MODEL_DIR, GRACE_TIMESTEP_PS, LAMMPS_EXE, MASSES,
-    PIPELINE_DIR, RESULTS_DIR, RUNS_DIR,
-    SLURM_NODES, SLURM_PARTITION, SLURM_TASKS_PER_NODE, SLURM_CPUS_PER_TASK, SLURM_WALLTIME_TM,
+    COEX_NX,
+    COEX_NY,
+    COEX_NZ,
+    COEX_TAU_P,
+    COEX_TAU_P_EQ,
+    COEX_TAU_T,
+    ELEMENTS,
+    GRACE_TIMESTEP_PS,
+    LAMMPS_EXE,
+    PIPELINE_DIR,
+    RESULTS_DIR,
+    RUNS_DIR,
+    SLURM_CPUS_PER_TASK,
+    SLURM_NODES,
+    SLURM_PARTITION,
+    SLURM_TASKS_PER_NODE,
+    SLURM_WALLTIME_TM,
 )
-from pipeline.constants import make_temperature_grid, sequential_fracs
+from logging_config import get_logger
+from pipeline.constants import make_temperature_grid
+from pipeline.lammps_common import mass_block, set_fraction_block
 
-ELEM_TYPE       = {e: i + 1 for i, e in enumerate(ELEMENTS)}
-COEX_SOLID_HALF = COEX_NZ // 2   # solid occupies z ∈ [0, NZ/2] in lattice units
+logger = get_logger(__name__)
 
+COEX_SOLID_HALF: int = COEX_NZ // 2   # solid occupies z in [0, NZ/2] in lattice units
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Block builders
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _mass_block() -> str:
-    return "\n".join(
-        f"mass  {ELEM_TYPE[e]}  {MASSES[e]}   # {e}" for e in ELEMENTS
-    )
-
-
-def _set_block(comp: dict[str, float]) -> str:
-    fracs = sequential_fracs(comp)
-    order = ["Mo", "Nb", "Zr", "Ti", "Ta"]
-    seeds = {"Mo": 2639, "Nb": 16392, "Zr": 7739, "Ti": 2039, "Ta": 56530}
-    lines = []
-    for e in order:
-        f = fracs.get(e, 0.0)
-        if f > 1e-9:
-            lines.append(
-                f"set group all type/fraction {ELEM_TYPE[e]} "
-                f"{f:.8f} {seeds[e]}   # {e}: target {comp.get(e,0):.4f}"
-            )
-    return "\n".join(lines) if lines else "# (pure W)"
+# Centred bracketing: always includes 1.0 x Tm_rom, in steps of 0.10.
+_BRACKET_FACTORS: list[float] = [0.80, 0.90, 1.00, 1.10, 1.20]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  T_guess bracketing helper
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Centred bracketing: always includes 1.0 × Tm_rom, ± steps of 0.10
-_BRACKET_FACTORS = [0.80, 0.90, 1.00, 1.10, 1.20]
+def tguess_values(tm_rom: float) -> list[int]:
+    """Return the bracketing ``T_guess`` values around ``Tm_rom``.
 
+    Parameters
+    ----------
+    tm_rom : float
+        Rule-of-mixtures melting temperature [K].
 
-def tguess_values(Tm_rom: float) -> list[int]:
+    Returns
+    -------
+    list of int
+        ``COEX_N_TGUESS`` temperatures.  In test mode (N=3) these are
+        ``[0.90, 1.00, 1.10] * Tm_rom``; in production (N=5) they are
+        ``[0.80, 0.90, 1.00, 1.10, 1.20] * Tm_rom``.
     """
-    Return COEX_N_TGUESS temperatures bracketing Tm_rom.
-    In TEST_MODE (N=3): [0.90, 1.00, 1.10] × Tm_rom
-    In production (N=5): [0.80, 0.90, 1.00, 1.10, 1.20] × Tm_rom
-    """
-    n     = COEX_N_TGUESS
-    mid   = len(_BRACKET_FACTORS) // 2
+    n = int(config.COEX_N_TGUESS)
+    mid = len(_BRACKET_FACTORS) // 2
     start = mid - n // 2
-    return [int(round(_BRACKET_FACTORS[i] * Tm_rom))
-            for i in range(start, start + n)]
+    return [
+        int(round(_BRACKET_FACTORS[i] * tm_rom))
+        for i in range(start, start + n)
+    ]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -111,22 +112,37 @@ def tguess_values(Tm_rom: float) -> list[int]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_coexistence_input(
-    comp:    dict[str, float],
-    a0:      float,
+    comp: dict[str, float],
+    a0: float,
     T_guess: int,
-    Tm_rom:  float,
+    Tm_rom: float,
 ) -> str:
-    """
-    Return a complete LAMMPS coexistence.in for one (composition, T_guess).
+    """Return a complete ``coexistence.in`` for one (composition, T_guess).
 
-    T_guess and Tm_rom are kept separate:
-      Tm_rom  → sets T_solid (0.5·Tm_rom) and T_liquid (2·Tm_rom)
-      T_guess → the NPT coexistence temperature being tested
+    ``T_guess`` and ``Tm_rom`` are kept separate: ``Tm_rom`` sets the solid
+    (``0.5 * Tm_rom``) and liquid (``2 * Tm_rom``) preparation temperatures,
+    while ``T_guess`` is the NPT coexistence temperature being tested.
+
+    Parameters
+    ----------
+    comp : dict of str to float
+        Mole fractions keyed by element symbol.
+    a0 : float
+        Lattice parameter [Angstrom].
+    T_guess : int
+        Coexistence test temperature [K].
+    Tm_rom : float
+        Rule-of-mixtures melting temperature [K].
+
+    Returns
+    -------
+    str
+        Complete LAMMPS input script.
     """
-    T_solid  = int(round(0.50 * Tm_rom))
-    T_liquid = int(round(2.00 * Tm_rom))
-    n_atoms  = COEX_NX * COEX_NY * COEX_NZ * 2
-    header   = ", ".join(f"{e}:{comp.get(e,0):.3f}" for e in ELEMENTS)
+    t_solid = int(round(0.50 * Tm_rom))
+    t_liquid = int(round(2.00 * Tm_rom))
+    n_atoms = COEX_NX * COEX_NY * COEX_NZ * 2
+    header = ", ".join(f"{e}:{comp.get(e, 0):.3f}" for e in ELEMENTS)
 
     return f"""\
 # ═══════════════════════════════════════════════════════════════════════════
@@ -135,7 +151,7 @@ def build_coexistence_input(
 # T_guess     : {T_guess} K   |   Tm_rom = {int(round(Tm_rom))} K
 # Method      : Modified Z-method + stress equalization (Karavaev 2016)
 # Potential   : GRACE-2L-OMAT (Zhu 2024)
-# Supercell   : {COEX_NX}×{COEX_NY}×{COEX_NZ} BCC = {n_atoms} atoms
+# Supercell   : {COEX_NX}x{COEX_NY}x{COEX_NZ} BCC = {n_atoms} atoms
 # ═══════════════════════════════════════════════════════════════════════════
 
 variable  GRACE_MODEL_DIR  getenv  GRACE_MODEL_DIR
@@ -153,10 +169,10 @@ region        box block 0 {COEX_NX} 0 {COEX_NY} 0 {COEX_NZ}
 create_box    6 box        # 6 element types for GRACE
 create_atoms  1 box        # all atoms start as W
 
-{_mass_block()}
+{mass_block()}
 
 # ── alloy composition ─────────────────────────────────────────────────────
-{_set_block(comp)}
+{set_fraction_block(comp)}
 
 # ── GRACE MLIP ────────────────────────────────────────────────────────────
 pair_style  grace
@@ -174,18 +190,18 @@ thermo_style custom step temp pe ke etotal press vol pxx pyy pzz
 min_style    hftn
 minimize     1.0e-8 1.0e-8 2000 2000
 
-# ── Step 2: equilibrate full crystal at T_solid = {T_solid} K ────────────
-velocity  all create {T_solid} 482751 dist gaussian
-fix       eq_solid all nvt temp {T_solid} {T_solid} {COEX_TAU_T}
-run       {COEX_N_EQUIL}
+# ── Step 2: equilibrate full crystal at T_solid = {t_solid} K ────────────
+velocity  all create {t_solid} 482751 dist gaussian
+fix       eq_solid all nvt temp {t_solid} {t_solid} {COEX_TAU_T}
+run       {int(config.COEX_N_EQUIL)}
 unfix     eq_solid
 
-# ── Step 3: melt liquid half at T_liquid = {T_liquid} K (2 × Tm_rom) ─────
+# ── Step 3: melt liquid half at T_liquid = {t_liquid} K (2 x Tm_rom) ─────
 #    Solid half is frozen (setforce 0) to preserve BCC order during melting.
 fix   freeze_solid solid_grp setforce 0.0 0.0 0.0
-velocity  liquid_grp create {T_liquid} 918273 dist gaussian
-fix       melt_liq liquid_grp nvt temp {T_liquid} {T_liquid} {COEX_TAU_T}
-run       {COEX_N_MELT}
+velocity  liquid_grp create {t_liquid} 918273 dist gaussian
+fix       melt_liq liquid_grp nvt temp {t_liquid} {t_liquid} {COEX_TAU_T}
+run       {int(config.COEX_N_MELT)}
 unfix     melt_liq
 unfix     freeze_solid
 
@@ -193,9 +209,9 @@ unfix     freeze_solid
 #    Independent x, y, z barostats (Karavaev requirement).
 #    NO velocity rescaling — it would destroy the solid/liquid interface.
 #    Convergence diagnostic (logged every 1000 steps):
-#      vol increasing  → melting (T_guess > Tm)   → run at lower T_guess
-#      vol decreasing  → freezing (T_guess < Tm)  → run at higher T_guess
-#      vol stable, |press| < 500 bar              → interface stable → Tm ≈ T_guess
+#      vol increasing  -> melting (T_guess > Tm)   -> run at lower T_guess
+#      vol decreasing  -> freezing (T_guess < Tm)  -> run at higher T_guess
+#      vol stable, |press| < 500 bar               -> interface stable -> Tm ~ T_guess
 
 fix   coex_npt all npt \\
       temp  {T_guess}  {T_guess}  {COEX_TAU_T} \\
@@ -207,7 +223,7 @@ thermo       1000
 thermo_style custom step temp pe ke etotal vol press pxx pyy pzz lx ly lz
 
 dump  coex_dump all custom 10000 dump.coexistence id type x y z vx vy vz
-run   {COEX_N_COEX}
+run   {int(config.COEX_N_COEX)}
 undump coex_dump
 unfix  coex_npt
 
@@ -225,7 +241,7 @@ fix   stress_eq all npt \\
 
 thermo       500
 thermo_style custom step temp pe ke etotal vol press pxx pyy pzz
-run   {COEX_N_STRESS_EQ}
+run   {int(config.COEX_N_STRESS_EQ)}
 unfix stress_eq
 
 # ── End marker (read by parse_coexistence_log) ────────────────────────────
@@ -238,8 +254,8 @@ print "COEXISTENCE_RESULT T_guess={T_guess} comp={header}"
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _env_block() -> str:
-    """Shared SLURM environment setup (micromamba + GRACE)."""
-    return f"""\
+    """Return the shared SLURM environment setup (micromamba + GRACE)."""
+    return """\
 source ~/.bashrc
 eval "$(micromamba shell hook --shell bash)"
 micromamba activate grace
@@ -253,17 +269,26 @@ export TF_INTRA_OP_PARALLELISM_THREADS=1
 export TF_INTER_OP_PARALLELISM_THREADS=1"""
 
 
-def build_tm_array_script(job_list: list[dict], max_concurrent: int = 20) -> None:
-    """
-    Write slurm/submit_Tm_array.sh — one SLURM array job for all Tm runs.
+def build_tm_array_script(
+    job_list: list[dict[str, object]],
+    max_concurrent: int = 20,
+) -> None:
+    """Write ``slurm/submit_Tm_array.sh`` as one SLURM array job.
 
-    The path dispatch table is embedded in the script as a bash associative
-    array so there is no runtime dependency on CSV files.
+    The path dispatch table is embedded in the script as bash associative
+    arrays, so there is no runtime dependency on CSV files.
+
+    Parameters
+    ----------
+    job_list : list of dict
+        Records with keys ``comp_id``, ``T_guess``, and ``path``.
+    max_concurrent : int, optional
+        Maximum number of concurrently running array tasks.
     """
-    n       = len(job_list)
+    n = len(job_list)
     n_comps = len({j["comp_id"] for j in job_list})
 
-    path_arr  = "\n".join(
+    path_arr = "\n".join(
         f'JOB_PATHS[{i}]="{j["path"]}"' for i, j in enumerate(job_list)
     )
     label_arr = "\n".join(
@@ -274,7 +299,7 @@ def build_tm_array_script(job_list: list[dict], max_concurrent: int = 20) -> Non
     script = f"""#!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════
 # submit_Tm_array.sh — SLURM Job Array for Tm Phase Coexistence
-# {n} runs : {n_comps} compositions × {COEX_N_TGUESS} T_guess values
+# {n} runs : {n_comps} compositions x {int(config.COEX_N_TGUESS)} T_guess values
 # Submit  : sbatch slurm/submit_Tm_array.sh
 # ═══════════════════════════════════════════════════════════════════════════
 #SBATCH --job-name=Tm_coex
@@ -320,7 +345,7 @@ exit $EXIT_CODE
     out.parent.mkdir(exist_ok=True)
     out.write_text(script)
     out.chmod(0o755)
-    print(f"[lammps_tm] Written: {out}  ({n} array tasks)")
+    logger.info("Wrote %s (%d array tasks)", out, n)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -328,163 +353,226 @@ exit $EXIT_CODE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def parse_coexistence_log(log_path: Path) -> float | None:
-    """
-    Return Tm estimate from log.coexistence, or None if not converged.
+    """Return the Tm estimate from ``log.coexistence``, or ``None``.
 
-    Reads all thermo rows from the log (columns: step temp pe ke etotal
-    vol press pxx pyy pzz).  Stops at the COEXISTENCE_RESULT print line.
-    The stress-equalization run is always last, so its rows are the tail.
+    Reads all thermo rows (columns ``step temp pe ke etotal vol press pxx pyy
+    pzz``) and stops at the ``COEXISTENCE_RESULT`` marker.  The stress
+    equalization run is always last, so its rows form the tail.
 
-    Convergence: mean |press| over the final 50 rows < 500 bar (0.05 GPa).
+    Convergence criterion: the mean absolute pressure over the final 50 rows
+    is below 500 bar (0.05 GPa).
+
+    Parameters
+    ----------
+    log_path : pathlib.Path
+        Path to the LAMMPS coexistence log.
+
+    Returns
+    -------
+    float or None
+        Mean temperature of the final 50 rows if converged, else ``None``.
+        Truncated or unreadable logs return ``None`` rather than raising.
     """
     if not log_path.exists():
         return None
 
-    temps:   list[float] = []
+    temps: list[float] = []
     presses: list[float] = []
     found_result = False
 
-    with log_path.open() as fh:
-        for line in fh:
-            s = line.strip()
-            if "COEXISTENCE_RESULT" in s:
-                found_result = True
-                break
-            parts = s.split()
-            # Thermo data line: first token is an integer step number, ≥10 cols
-            if len(parts) >= 10 and parts[0].isdigit():
-                try:
-                    temps.append(float(parts[1]))    # temp
-                    presses.append(float(parts[6]))  # press
-                except ValueError:
-                    continue
+    try:
+        with log_path.open() as fh:
+            for line in fh:
+                stripped = line.strip()
+                if "COEXISTENCE_RESULT" in stripped:
+                    found_result = True
+                    break
+                parts = stripped.split()
+                # Thermo data line: integer step number, at least 10 columns.
+                if len(parts) >= 10 and parts[0].isdigit():
+                    try:
+                        temps.append(float(parts[1]))    # temp
+                        presses.append(float(parts[6]))  # press
+                    except ValueError:
+                        continue
+    except OSError as exc:
+        logger.warning("Cannot read %s (%s)", log_path, exc)
+        return None
 
     if not found_result or len(temps) < 10:
-        return None   # run crashed or didn't complete
+        return None   # run crashed or did not complete
 
     tail_p = presses[-50:]
     if abs(statistics.mean(tail_p)) < 500.0:
         return statistics.mean(temps[-50:])
     return None
 
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  Directory builder — Stage 3b
+#  Directory builder - Stage 3b
 # ══════════════════════════════════════════════════════════════════════════════
 
-def create_tm_directories(compositions_df: pd.DataFrame,
-                           constants_df:   pd.DataFrame) -> list[dict]:
+def create_tm_directories(
+    compositions_df: pd.DataFrame,
+    constants_df: pd.DataFrame,
+) -> list[dict[str, object]]:
+    """Write ``runs/<comp_id>/tm_coexistence/T_<guess>/coexistence.in``.
+
+    Parameters
+    ----------
+    compositions_df : pandas.DataFrame
+        Output of :func:`pipeline.compositions.generate_compositions`.
+    constants_df : pandas.DataFrame
+        Output of :func:`pipeline.constants.compute_all_constants`.
+
+    Returns
+    -------
+    list of dict
+        Records with keys ``comp_id``, ``T_guess``, ``Tm_rom``, and ``path``.
+        Also written to ``results/tm_job_list.csv``.
     """
-    Write runs/<comp_id>/tm_coexistence/T_<guess>/coexistence.in.
-    Returns job list and saves results/tm_job_list.csv.
-    """
-    job_list: list[dict] = []
+    job_list: list[dict[str, object]] = []
 
     for _, crow in compositions_df.iterrows():
-        comp_id = crow["comp_id"]
-        comp    = {e: float(crow[f"x_{e}"]) for e in ELEMENTS}
+        comp_id = str(crow["comp_id"])
+        comp = {e: float(crow[f"x_{e}"]) for e in ELEMENTS}
 
         const = constants_df[constants_df["comp_id"] == comp_id]
         if const.empty:
-            print(f"[WARN] {comp_id}: no constants row — skipped")
+            logger.warning("%s: no constants row - skipped", comp_id)
             continue
 
-        a0     = float(const.iloc[0]["a0_vegard"])
-        Tm_rom = float(const.iloc[0]["Tm"])
+        a0 = float(const.iloc[0]["a0_vegard"])
+        tm_rom = float(const.iloc[0]["Tm"])
 
-        for T_guess in tguess_values(Tm_rom):
-            sim_dir = RUNS_DIR / comp_id / "tm_coexistence" / f"T_{T_guess}"
+        for t_guess in tguess_values(tm_rom):
+            sim_dir = RUNS_DIR / comp_id / "tm_coexistence" / f"T_{t_guess}"
             sim_dir.mkdir(parents=True, exist_ok=True)
             (sim_dir / "dump").mkdir(exist_ok=True)
 
             (sim_dir / "coexistence.in").write_text(
-                build_coexistence_input(comp, a0, T_guess, Tm_rom)
+                build_coexistence_input(comp, a0, t_guess, tm_rom)
             )
 
             job_list.append({
                 "comp_id": comp_id,
-                "T_guess": T_guess,
-                "Tm_rom":  round(Tm_rom, 1),
-                "path":    str(sim_dir),
+                "T_guess": t_guess,
+                "Tm_rom": round(tm_rom, 1),
+                "path": str(sim_dir),
             })
 
     out_csv = RESULTS_DIR / "tm_job_list.csv"
     pd.DataFrame(job_list).to_csv(out_csv, index=False)
-    print(f"[lammps_tm] {len(job_list)} coexistence directories  →  {out_csv}")
+    logger.info("Created %d coexistence directories -> %s", len(job_list), out_csv)
     return job_list
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Patch constants — Stage 3c
+#  Patch constants - Stage 3c
 # ══════════════════════════════════════════════════════════════════════════════
 
-def patch_constants_with_tm(constants_csv: Path,
-                             job_list:      list[dict]) -> None:
-    """
-    Read completed log.coexistence files, identify stable T_guess for each
-    composition, and write real_Tm + make_temperature_grid(real_Tm) back to
-    constants_all.csv.
+def patch_constants_with_tm(
+    constants_csv: Path,
+    job_list: list[dict[str, object]],
+) -> None:
+    """Patch ``constants_all.csv`` with the real Tm from coexistence logs.
 
-    Accepts multiple converged T_guess values per composition and averages
-    them.  Warns if spread > 100 K (bracketing may have missed the window).
+    Reads the completed ``log.coexistence`` files, identifies the stable
+    ``T_guess`` for each composition, and writes the real Tm and the rebuilt
+    temperature grid back to ``constants_all.csv``.  Multiple converged
+    ``T_guess`` values per composition are averaged; a spread above 100 K
+    triggers a warning that the bracketing may have missed the window.
+
+    Parameters
+    ----------
+    constants_csv : pathlib.Path
+        Path to ``results/constants_all.csv``.
+    job_list : list of dict
+        Records with keys ``comp_id`` and ``path``.
     """
     df = pd.read_csv(constants_csv)
 
-    by_comp: dict[str, list[dict]] = {}
-    for j in job_list:
-        by_comp.setdefault(j["comp_id"], []).append(j)
+    by_comp: dict[str, list[dict[str, object]]] = {}
+    for job in job_list:
+        by_comp.setdefault(str(job["comp_id"]), []).append(job)
 
     updated = 0
     for comp_id, jobs in by_comp.items():
-        converged = []
-        for j in sorted(jobs, key=lambda x: x["T_guess"]):
-            Tm = parse_coexistence_log(Path(j["path"]) / "log.coexistence")
-            if Tm is not None:
-                converged.append(Tm)
+        converged: list[float] = []
+        for job in sorted(jobs, key=lambda x: x["T_guess"]):
+            tm = parse_coexistence_log(Path(str(job["path"])) / "log.coexistence")
+            if tm is not None:
+                converged.append(tm)
 
         if not converged:
-            print(f"[WARN] {comp_id}: no converged run — keeping Tm_rom")
+            logger.warning("%s: no converged run - keeping Tm_rom", comp_id)
             continue
 
-        real_Tm = statistics.mean(converged)
-        spread  = max(converged) - min(converged) if len(converged) > 1 else 0.0
+        real_tm = statistics.mean(converged)
+        spread = max(converged) - min(converged) if len(converged) > 1 else 0.0
         if spread > 100.0:
-            print(f"[WARN] {comp_id}: Tm spread = {spread:.0f} K — "
-                  f"check bracketing")
+            logger.warning(
+                "%s: Tm spread = %.0f K - check bracketing", comp_id, spread
+            )
 
-        T_grid = make_temperature_grid(real_Tm)
-        mask   = df["comp_id"] == comp_id
-        df.loc[mask, "Tm"]     = round(real_Tm, 1)
-        df.loc[mask, "T_grid"] = json.dumps(T_grid)
+        t_grid = make_temperature_grid(real_tm)
+        mask = df["comp_id"] == comp_id
+        df.loc[mask, "Tm"] = round(real_tm, 1)
+        df.loc[mask, "T_grid"] = json.dumps(t_grid)
         updated += 1
-        print(f"  {comp_id}: Tm = {real_Tm:.0f} K  "
-              f"(spread {spread:.0f} K, {len(converged)} pts)  "
-              f"T_grid = {T_grid}")
+        logger.info(
+            "%s: Tm = %.0f K (spread %.0f K, %d pts)  T_grid = %s",
+            comp_id, real_tm, spread, len(converged), t_grid,
+        )
 
     df.to_csv(constants_csv, index=False)
-    print(f"[lammps_tm] Patched {updated}/{len(by_comp)} compositions  "
-          f"→  {constants_csv}")
+    logger.info(
+        "Patched %d/%d compositions -> %s", updated, len(by_comp), constants_csv
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Pipeline entry points (called from run_pipeline.py)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def stage_3b(comps_df: pd.DataFrame, consts_df: pd.DataFrame,
-             max_concurrent: int = 20) -> list[dict]:
-    """Generate coexistence inputs and submit_Tm_array.sh."""
+def stage_3b(
+    comps_df: pd.DataFrame,
+    consts_df: pd.DataFrame,
+    max_concurrent: int = 20,
+) -> list[dict[str, object]]:
+    """Generate coexistence inputs and ``slurm/submit_Tm_array.sh``.
+
+    Parameters
+    ----------
+    comps_df : pandas.DataFrame
+        Compositions table.
+    consts_df : pandas.DataFrame
+        Constants table.
+    max_concurrent : int, optional
+        Maximum number of concurrently running array tasks.
+
+    Returns
+    -------
+    list of dict
+        Coexistence job records.
+    """
     job_list = create_tm_directories(comps_df, consts_df)
     build_tm_array_script(job_list, max_concurrent)
-    print("\n  Next: sbatch slurm/submit_Tm_array.sh")
-    print("  After jobs finish: python run_pipeline.py --only_stage 32\n")
+    logger.info("Next: sbatch slurm/submit_Tm_array.sh")
+    logger.info("After jobs finish: python run_pipeline.py --only_stage 32")
     return job_list
 
 
 def stage_3c() -> None:
-    """Patch constants_all.csv with real Tm from completed coexistence logs."""
+    """Patch ``constants_all.csv`` with the real Tm from completed logs.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``results/tm_job_list.csv`` is missing (Stage 3b not yet run).
+    """
     job_csv = RESULTS_DIR / "tm_job_list.csv"
     if not job_csv.exists():
-        raise FileNotFoundError(
-            f"{job_csv} not found — run Stage 3b first"
-        )
+        raise FileNotFoundError(f"{job_csv} not found - run Stage 3b first")
     jobs = pd.read_csv(job_csv).to_dict("records")
     patch_constants_with_tm(RESULTS_DIR / "constants_all.csv", jobs)

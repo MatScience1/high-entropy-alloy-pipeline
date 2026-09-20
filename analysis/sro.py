@@ -1,68 +1,82 @@
-"""
-analysis/sro.py
-===============
-Stage 9 — Warren-Cowley short-range order (SRO) parameters.
+"""Stage 9 - Warren-Cowley short-range order (SRO) parameters.
 
-Interface (called by run_pipeline.py)
---------------------------------------
-    process(sim_base: Path, txt_dir: Path,
-            plot_dir: Path, comp_label: str) -> None
+Interface (called by ``run_pipeline.py``)
+-----------------------------------------
+``process(sim_base, res_txt_dir, res_plot_dir, comp_label)``
 
 Physics
 -------
-SRO is read from MD_T_<T>K.txt (written by the LAMMPS fix ave/time block).
+SRO is read from ``MD_T_<T>K.txt``, written by the LAMMPS ``fix ave/time``
+block.  The Warren-Cowley parameter (Cowley 1950) is
 
-Warren-Cowley parameter (Cowley 1950):
-    α_ij = 1 − P_ij / x_j
+.. math::
 
-where:
-    P_ij = conditional probability of finding j as neighbour of i
-         = (avg coord_ij) / z_i
-    z_i  = total coordination of i = Σ_j avg coord_ij
-    x_j  = bulk mole fraction of j
+    \\alpha_{ij} = 1 - \\frac{P_{ij}}{x_j},
+
+where
+
+.. math::
+
+    P_{ij} = \\frac{\\bar{n}_{ij}}{z_i}, \\qquad z_i = \\sum_j \\bar{n}_{ij}
+
+is the conditional probability of finding element :math:`j` as a neighbour of
+:math:`i`, :math:`\\bar{n}_{ij}` is the time-averaged number of :math:`j`
+neighbours within the cutoff, and :math:`x_j` is the bulk mole fraction.
 
 Interpretation:
-    α_ij = 0   : random mixing
-    α_ij > 0   : i−j pairs depleted  (like-atom clustering)
-    α_ij < 0   : i−j pairs enriched  (chemical ordering)
 
-SRO cutoff r_sro used in the LAMMPS compute is the BCC 1NN/2NN midpoint
-(see config.compute_r_sro), which safely captures the first shell for all
-elements including Zr (r_1NN = 3.10 Å).
+* :math:`\\alpha_{ij} = 0`: random mixing
+* :math:`\\alpha_{ij} > 0`: :math:`i`-:math:`j` pairs depleted (clustering)
+* :math:`\\alpha_{ij} < 0`: :math:`i`-:math:`j` pairs enriched (ordering)
+
+The cutoff ``r_sro`` used in the LAMMPS compute is the BCC 1NN/2NN midpoint
+(see :func:`config.compute_r_sro`), which captures the first shell for all
+elements including Zr (``r_1NN = 3.10`` Angstrom).
 
 Output
 ------
-    results/<comp_id>/txt/sro_<T>K.txt
-    results/<comp_id>/plots/sro_heatmap_<comp_label>.png
+``results/<comp_id>/txt/sro_vs_temp.csv``
+``results/<comp_id>/plots/sro_vs_temp.png``
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
 import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
-# All possible pairs for 6 elements (36 total, including self-pairs)
-ELEMENTS_ALL = ["W", "Mo", "Nb", "Zr", "Ti", "Ta"]
-ALL_PAIRS = [(a, b) for a in ELEMENTS_ALL for b in ELEMENTS_ALL]
+from analysis.logparse import LogParseError, read_lines  # noqa: E402
+from logging_config import configure_logging, get_logger  # noqa: E402
+from reporting import log_dataframe  # noqa: E402
 
-COLORS_CYCLE = [
-    "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
-    "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf",
-    "#aec7e8","#ffbb78","#98df8a","#ff9896","#c5b0d5",
-    "#c49c94","#f7b6d2","#c7c7c7","#dbdb8d","#9edae5",
+logger = get_logger(__name__)
+
+# All possible pairs for six elements (36 total, including self-pairs).
+ELEMENTS_ALL: list[str] = ["W", "Mo", "Nb", "Zr", "Ti", "Ta"]
+ALL_PAIRS: list[tuple[str, str]] = [
+    (a, b) for a in ELEMENTS_ALL for b in ELEMENTS_ALL
 ]
-MARKERS = ["o","s","^","D","v","P","X","*","p","h",
-           "<",">","8","H","+","x","d","|","_","1"]
+
+COLORS_CYCLE: list[str] = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+    "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
+    "#c49c94", "#f7b6d2", "#c7c7c7", "#dbdb8d", "#9edae5",
+]
+MARKERS: list[str] = [
+    "o", "s", "^", "D", "v", "P", "X", "*", "p", "h",
+    "<", ">", "8", "H", "+", "x", "d", "|", "_", "1",
+]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -70,18 +84,30 @@ MARKERS = ["o","s","^","D","v","P","X","*","p","h",
 # ══════════════════════════════════════════════════════════════════════════════
 
 def parse_avtime_file(fpath: Path) -> tuple[np.ndarray, dict[str, int]]:
-    """
-    Read a LAMMPS ave/time output file.
-    Returns (data_array, col_index_dict).
-    Line 1: "# Timestep ..."  or similar comment
-    Line 2: column names
-    Remaining lines: data rows.
-    """
-    with open(fpath) as fh:
-        lines = fh.readlines()
+    """Read a LAMMPS ``fix ave/time`` output file.
 
-    # Find header line (starts with "# " and contains "TimeStep" or "v_")
-    header_line = None
+    The file has a comment/header line containing the column names followed by
+    numeric data rows.  Malformed rows are skipped; parsing stops at the first
+    non-numeric line.
+
+    Parameters
+    ----------
+    fpath : pathlib.Path
+        Path to the ``MD_T_<T>K.txt`` file.
+
+    Returns
+    -------
+    tuple of (numpy.ndarray, dict of str to int)
+        The data matrix and a mapping of column name to column index.
+
+    Raises
+    ------
+    LogParseError
+        If the file is missing, has no recognisable header, or has no data.
+    """
+    lines = read_lines(fpath)
+
+    header_line: str | None = None
     header_lineno = 0
     for i, line in enumerate(lines):
         stripped = line.lstrip("#").strip()
@@ -91,13 +117,13 @@ def parse_avtime_file(fpath: Path) -> tuple[np.ndarray, dict[str, int]]:
             break
 
     if header_line is None:
-        raise ValueError(f"Cannot find column header in {fpath}")
+        raise LogParseError(f"cannot find column header in {fpath}")
 
     col_names = header_line.split()
     col_idx = {name: j for j, name in enumerate(col_names)}
 
-    # Parse data rows
-    rows = []
+    rows: list[list[float]] = []
+    n_skipped = 0
     for line in lines[header_lineno + 1:]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -105,10 +131,17 @@ def parse_avtime_file(fpath: Path) -> tuple[np.ndarray, dict[str, int]]:
         try:
             rows.append([float(x) for x in stripped.split()])
         except ValueError:
-            break
+            n_skipped += 1
+            continue
+
+    if n_skipped:
+        logger.warning(
+            "Skipped %d malformed row(s) in %s (truncated file?)",
+            n_skipped, fpath,
+        )
 
     if not rows:
-        raise ValueError(f"No data rows in {fpath}")
+        raise LogParseError(f"no data rows in {fpath}")
 
     return np.array(rows), col_idx
 
@@ -117,15 +150,34 @@ def parse_avtime_file(fpath: Path) -> tuple[np.ndarray, dict[str, int]]:
 #  Main processing
 # ══════════════════════════════════════════════════════════════════════════════
 
-def process(sim_base: Path, res_txt_dir: Path, res_plot_dir: Path,
-            comp_label: str = "") -> None:
-    """
-    Collect SRO parameters from all sim_T directories under sim_base.
-    The ave/time output file is named MD_T_<T>K.txt (generated by the pipeline
-    LAMMPS input template) or MD_T_<T>K__*.txt (original naming).
+def process(
+    sim_base: Path,
+    res_txt_dir: Path,
+    res_plot_dir: Path,
+    comp_label: str = "",
+) -> None:
+    """Collect SRO parameters from all ``sim_T`` directories under ``sim_base``.
+
+    The ``fix ave/time`` output file is named ``MD_T_<T>K.txt`` (generated by
+    the pipeline LAMMPS template) or ``MD_T_<T>K__*.txt`` (legacy naming).
+
+    Parameters
+    ----------
+    sim_base : pathlib.Path
+        Directory containing ``sim_<T>`` subdirectories.
+    res_txt_dir : pathlib.Path
+        Output directory for ``sro_vs_temp.csv``.
+    res_plot_dir : pathlib.Path
+        Output directory for ``sro_vs_temp.png``.
+    comp_label : str, optional
+        Composition label used in the plot title.
     """
     res_txt_dir.mkdir(parents=True, exist_ok=True)
     res_plot_dir.mkdir(parents=True, exist_ok=True)
+
+    if not sim_base.exists():
+        logger.warning("simulation base not found: %s", sim_base)
+        return
 
     sim_dirs = sorted(
         [d for d in sim_base.iterdir()
@@ -133,83 +185,71 @@ def process(sim_base: Path, res_txt_dir: Path, res_plot_dir: Path,
         key=lambda d: int(d.name.split("_")[1]),
     )
 
-    T_actual_list: list[float] = []
-    sro_data: dict[str, list[float]] = {}   # key: "alphaWW", "alphaWMo", …
+    t_actual_list: list[float] = []
+    sro_data: dict[str, list[float]] = {}   # key: "alphaWW", "alphaWMo", ...
 
-    for sd in sim_dirs:
-        # Find the ave/time output file
+    for sim_dir in sim_dirs:
         candidates = (
-            list(sd.glob("MD_T_*.txt")) +
-            list(sd.glob("MD_T_*K.txt"))
+            list(sim_dir.glob("MD_T_*.txt"))
+            + list(sim_dir.glob("MD_T_*K.txt"))
         )
         if not candidates:
-            print(f"  [skip] no MD_T_*.txt in {sd}")
+            logger.warning("no MD_T_*.txt in %s - skipped", sim_dir)
             continue
 
-        fpath = candidates[-1]   # take last if multiple
+        fpath = candidates[-1]   # take the last if multiple
         try:
             data, col_idx = parse_avtime_file(fpath)
-        except Exception as exc:
-            print(f"  [WARN] {fpath}: {exc}")
+        except LogParseError as exc:
+            logger.warning("%s: %s", fpath, exc)
             continue
 
-        # Use the last row (equilibrated end of run)
-        row = data[-1]
+        row = data[-1]   # last row = equilibrated end of run
 
-        # Extract temperature
         if "c_T_c" in col_idx:
-            T_val = row[col_idx["c_T_c"]]
-        elif "TimeStep" in col_idx:
-            T_nom = int(sd.name.split("_")[1])
-            T_val = float(T_nom)
+            t_val = float(row[col_idx["c_T_c"]])
         else:
-            T_val = float(sd.name.split("_")[1])
+            t_val = float(sim_dir.name.split("_")[1])
+        t_actual_list.append(t_val)
 
-        T_actual_list.append(T_val)
-
-        # Extract all available alpha_ij columns
         for (a, b) in ALL_PAIRS:
-            col_name_variants = [
-                f"v_alpha{a}{b}",   # pipeline naming
-                f"alpha{a}{b}",     # alternative
-            ]
-            val = None
-            for cn in col_name_variants:
-                if cn in col_idx:
-                    val = float(row[col_idx[cn]])
+            for col_name in (f"v_alpha{a}{b}", f"alpha{a}{b}"):
+                if col_name in col_idx:
+                    sro_data.setdefault(f"alpha{a}{b}", []).append(
+                        float(row[col_idx[col_name]])
+                    )
                     break
-            if val is not None:
-                key = f"alpha{a}{b}"
-                if key not in sro_data:
-                    sro_data[key] = []
-                sro_data[key].append(val)
 
-    if not T_actual_list:
-        print("[sro] No data collected")
+    if not t_actual_list:
+        logger.warning("no SRO data collected")
         return
 
-    T_arr = np.array(T_actual_list)
-    # Only keep pairs where we collected a full set
-    n = len(T_arr)
+    t_arr = np.array(t_actual_list)
+    n = len(t_arr)
     active_pairs = [k for k, v in sro_data.items() if len(v) == n]
 
     # ── save CSV ──────────────────────────────────────────────────────────────
     header = "T_actual " + " ".join(active_pairs)
-    table = np.column_stack([T_arr] + [sro_data[k] for k in active_pairs])
+    table = np.column_stack([t_arr] + [sro_data[k] for k in active_pairs])
     csv_path = res_txt_dir / "sro_vs_temp.csv"
     np.savetxt(csv_path, table, header=header, fmt="%.6f", comments="# ")
-    print(f"[sro] Saved {csv_path}  ({len(active_pairs)} pairs)")
+    logger.info("Saved %s (%d pairs)", csv_path, len(active_pairs))
+
+    # ── summary table ─────────────────────────────────────────────────────────
+    summary = pd.DataFrame(
+        {k: sro_data[k] for k in active_pairs}, index=np.round(t_arr, 1)
+    )
+    summary.index.name = "T_actual"
+    log_dataframe(logger, summary, title="SRO parameters (final row per T):")
 
     # ── plot ──────────────────────────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=(10, 6))
     for i, key in enumerate(active_pairs):
-        color  = COLORS_CYCLE[i % len(COLORS_CYCLE)]
+        color = COLORS_CYCLE[i % len(COLORS_CYCLE)]
         marker = MARKERS[i % len(MARKERS)]
-        # human-readable label: alphaWMo → W-Mo
         a, b = key[5:6], key[6:]
-        label = f"{a}-{b}"
-        ax.plot(T_arr, sro_data[key], marker=marker, color=color,
-                label=label, lw=1.5, ms=5, alpha=0.85)
+        ax.plot(t_arr, sro_data[key], marker=marker, color=color,
+                label=f"{a}-{b}", lw=1.5, ms=5, alpha=0.85)
 
     ax.axhline(0, color="black", lw=1, ls="--", alpha=0.6)
     ax.set_xlabel("Temperature (K)", fontsize=13)
@@ -224,16 +264,18 @@ def process(sim_base: Path, res_txt_dir: Path, res_plot_dir: Path,
     png_path = res_plot_dir / "sro_vs_temp.png"
     fig.savefig(png_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"[sro] Saved {png_path}")
+    logger.info("Saved %s", png_path)
 
 
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="SRO vs temperature")
-    ap.add_argument("--sim_base",  default="../sim_x")
-    ap.add_argument("--res_txt",   default="../results/txt")
-    ap.add_argument("--res_plot",  default="../results/plots")
-    ap.add_argument("--label",     default="")
-    args = ap.parse_args()
+def main() -> None:
+    """Command-line entry point for SRO aggregation."""
+    configure_logging()
+    parser = argparse.ArgumentParser(description="SRO vs temperature.")
+    parser.add_argument("--sim_base", default="../sim_x")
+    parser.add_argument("--res_txt", default="../results/txt")
+    parser.add_argument("--res_plot", default="../results/plots")
+    parser.add_argument("--label", default="")
+    args = parser.parse_args()
     process(
         Path(args.sim_base),
         Path(args.res_txt),
@@ -241,3 +283,6 @@ if __name__ == "__main__":
         args.label,
     )
 
+
+if __name__ == "__main__":
+    main()
